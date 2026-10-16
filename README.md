@@ -1,14 +1,52 @@
-# astrbot-plugin-helloworld
+# astrbot_plugin_CNTIR_bot
 
-AstrBot 插件模板 / A template plugin for AstrBot plugin feature
+AstrBot 的 **CNTIR（欧洲卡车模拟 2 联机平台）** 查询插件。
 
-> [!NOTE]
-> This repo is just a template of [AstrBot](https://github.com/AstrBotDevs/AstrBot) Plugin.
-> 
-> [AstrBot](https://github.com/AstrBotDevs/AstrBot) is an agentic assistant for both personal and group conversations. It can be deployed across dozens of mainstream instant messaging platforms, including QQ, Telegram, Feishu, DingTalk, Slack, LINE, Discord, Matrix, etc. In addition, it provides a reliable and extensible conversational AI infrastructure for individuals, developers, and teams. Whether you need a personal AI companion, an intelligent customer support agent, an automation assistant, or an enterprise knowledge base, AstrBot enables you to quickly build AI applications directly within your existing messaging workflows.
+> 数据来源：[CNTIR 公开数据 API](https://cntir.ltchedui.com/developers)（只读、免鉴权、免费）。
+> 数据与图片版权归 CNTIR 平台所有，本插件仅为数据展示工具。
 
-# Supports
+## 功能
 
-- [AstrBot Repo](https://github.com/AstrBotDevs/AstrBot)
-- [AstrBot Plugin Development Docs (Chinese)](https://docs.astrbot.app/dev/star/plugin-new.html)
-- [AstrBot Plugin Development Docs (English)](https://docs.astrbot.app/en/dev/star/plugin-new.html)
+| 指令 | 说明 |
+|---|---|
+| `cnt绑定 <账号ID>` | 绑定 CNTIR 账号（可绑多个，账号 ID 见官网个人主页） |
+| `cnt解绑 [序号/账号ID/全部]` | 解除指定绑定（默认解绑主账号） |
+| `cnt切换 <序号/账号ID>` | 切换主账号 |
+| `cnt我的` | 查看我的全部绑定（标注主账号） |
+| `cnt查询 [ID/@群友]` | 玩家资料：身份/车队/Steam/封禁/累计运单/最近运单（附头像） |
+| `cnt定位 [ID/@群友]` | 实时位置：服务器/速度/朝向/附近玩家 + ETS2 底图出图 |
+| `cnt路况 [服务器编号]` | 在线玩家分布：行驶统计/最快玩家/热点区域 + 全图出图 |
+| `cnt服务器` | 服务器状态：人数/排队/峰值/游戏内时间/特性开关 |
+| `cnt历史 [服务器] [小时]` | 在线历史曲线（在线率/最长在线/切换次数）+ SVG 状态图 |
+| `cnt统计` | 平台统计：在线/注册/运单/里程 |
+| `cnt车队 [ID\|关键词]` | 车队列表、搜索、详情 |
+| `cnt活动 [今日/精选/结束/页码]` | 活动列表 |
+| `cnt活动详情 <ID>` | 活动详情：规则/路线/DLC/报名玩家/参与车队 |
+| `cnt新闻 [页码]` | 新闻列表 |
+| `cnt新闻详情 <ID>` | 新闻正文（Markdown，超长截断并附原文链接） |
+| `cnt公告` | 当前生效的全站公告 |
+| `cnt版本` | CNTIR 插件/启动器/支持的游戏版本 |
+| `cnt菜单` | 帮助菜单 |
+
+**指令默认不需要 `cnt` 前缀**：直接发「查询」「服务器」「路况」即可（仍兼容 `cnt查询`、`/查询` 两种写法）。
+菜单额外支持 `菜单` / `帮助` / `help` / `说明` 四个写法。
+
+命令行前缀由 `enable_no_prefix`（默认 `true`）控制：
+
+- `true`（默认）：`查询`、`cnt查询`、`/查询` 三种写法全部可用，菜单与提示文案自动显示为**不带前缀**的形式；
+- `false`：只有 `cnt查询` 生效，菜单与提示文案自动显示为**带 `cnt`** 的形式。若与 tmp-bot 等其他卡车联机插件同时启用，建议设为 `false` 避免抢命令。
+
+> AstrBot 指令面板中显示的 `cnt绑定` 等条目仅用于展示与权限配置，实际发送时按上述规则可省略 `cnt`。
+
+「查询 / 定位」支持 `@群友` 代查对方绑定的主账号。
+
+## 安装
+
+1. 将本目录放入 AstrBot 的 `data/plugins/` 下（或通过插件市场安装）；
+2. 依赖仅 `aiohttp`（`pip install -r requirements.txt`，AstrBot 会自动安装）；
+3. 重启 AstrBot，发送 `cnt菜单` 验证。
+
+
+## License
+
+GPL-3.0
