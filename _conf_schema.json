@@ -5,32 +5,22 @@
     "description": "CNTIR API 请求超时时间（秒）",
     "hint": "建议 5-15 秒"
   },
-  "servers_cache_seconds": {
-    "type": "int",
-    "default": 15,
-    "description": "服务器列表接口的本地缓存时间（秒）",
-    "hint": "CNTIR 官方要求服务器状态查询频率不高于 15 秒一次，请勿低于 15"
-  },
-  "map_cache_seconds": {
-    "type": "int",
-    "default": 5,
-    "description": "实时地图接口的本地缓存时间（秒）",
-    "hint": "CNTIR 官方要求实时地图查询频率不高于 5 秒一次，请勿低于 5"
-  },
-  "user_cache_seconds": {
+  "cache_ttl_seconds": {
     "type": "int",
     "default": 30,
-    "description": "玩家资料接口的本地缓存时间（秒）"
-  },
-  "list_cache_seconds": {
-    "type": "int",
-    "default": 60,
-    "description": "新闻/活动/车队等列表接口的本地缓存时间（秒）"
+    "description": "统一的接口缓存时间（秒）。同时作用于服务器状态、实时地图、玩家资料、新闻/活动/车队列表、统计、在线历史、版本等全部接口",
+    "hint": "CNTIR 官方限频要求：服务器状态不高于 15 秒一次、实时地图不高于 5 秒一次，插件会自动按这两个下限保护（填 1 也会自动按 15/5 生效）；建议 15-60，设置过大时定位/路况等实时数据会明显滞后"
   },
   "max_bind_count": {
     "type": "int",
     "default": 3,
     "description": "每个用户最多可绑定的 CNTIR 账号数量（1-10）"
+  },
+  "disable_t2i": {
+    "type": "bool",
+    "default": true,
+    "description": "强制以纯文本形式回复（不走 AstrBot 的「文本转图片」渲染）",
+    "hint": "关闭后，长文本将由 AstrBot 全局「文本转图像」设置决定是否渲染成图片"
   },
   "enable_no_prefix": {
     "type": "bool",
