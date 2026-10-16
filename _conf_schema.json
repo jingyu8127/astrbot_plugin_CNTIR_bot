@@ -16,12 +16,6 @@
     "default": 3,
     "description": "每个用户最多可绑定的 CNTIR 账号数量（1-10）"
   },
-  "disable_t2i": {
-    "type": "bool",
-    "default": true,
-    "description": "强制以纯文本形式回复（不走 AstrBot 的「文本转图片」渲染）",
-    "hint": "关闭后，长文本将由 AstrBot 全局「文本转图像」设置决定是否渲染成图片"
-  },
   "enable_no_prefix": {
     "type": "bool",
     "default": true,

@@ -483,27 +483,6 @@ class CntirBotPlugin(Star):
         return self._save_bindings(bindings)
 
     # ----------------------------- 消息辅助 -----------------------------
-    def _plain(self, event: AstrMessageEvent, text: str):
-        """发送纯文本。disable_t2i 开启时强制不走 AstrBot 的「文本转图片」渲染，
-        避免长文本（如菜单）被渲染成排版错乱的图片。"""
-        res = event.plain_result(text)
-        if self._cfg_bool("disable_t2i", True):
-            try:
-                res.use_t2i_ = False
-            except Exception:
-                pass
-        return res
-
-    def _chain(self, event: AstrMessageEvent, comps):
-        """发送消息链（图片+文字等），同样强制纯文本策略。"""
-        res = event.chain_result(comps)
-        if self._cfg_bool("disable_t2i", True):
-            try:
-                res.use_t2i_ = False
-            except Exception:
-                pass
-        return res
-
     @staticmethod
     def _extract_at_id(event: AstrMessageEvent) -> Optional[str]:
         """解析消息链中的 @ 目标用户 ID。"""
@@ -643,13 +622,13 @@ class CntirBotPlugin(Star):
             f"────────────────────\n"
             f"数据来源：CNTIR（{PLUGIN_PAGE}），接口免费公开，请合理使用"
         )
-        yield self._plain(event, text)
+        yield event.plain_result(text)
 
     async def do_bind(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
         sender_id = str(event.get_sender_id())
         if not arg or not arg.isdigit():
-            yield self._plain(event, "请输入要绑定的 CNTIR 账号 ID（纯数字）\n"
+            yield event.plain_result("请输入要绑定的 CNTIR 账号 ID（纯数字）\n"
                                      f"账号 ID 可在 CNTIR 官网个人主页查看，格式：{self._p}绑定 1024")
             return
         uid = int(arg)
@@ -657,40 +636,40 @@ class CntirBotPlugin(Star):
             user = await self.api_user(uid)
         except CntirApiError as e:
             if e.status == 404:
-                yield self._plain(event, f"账号 {uid} 不存在，请检查 ID 是否正确")
+                yield event.plain_result(f"账号 {uid} 不存在，请检查 ID 是否正确")
             else:
-                yield self._plain(event, f"绑定失败：{e.message}")
+                yield event.plain_result(f"绑定失败：{e.message}")
             return
         name = _clean(user.get("name")) or f"玩家{uid}"
         accounts = self._accounts(sender_id)
         if any(int(a["cntir_id"]) == uid for a in accounts):
-            yield self._plain(event, f"账号 {uid}（{name}）已经在您的绑定列表中了")
+            yield event.plain_result(f"账号 {uid}（{name}）已经在您的绑定列表中了")
             return
         if len(accounts) >= self._max_bind:
-            yield self._plain(event, 
+            yield event.plain_result(
                 f"最多只能绑定 {self._max_bind} 个账号，请先解绑：{self._p}解绑 <序号/账号ID>")
             return
         accounts.append({"cntir_id": uid, "name": name, "bind_time": int(_utc_offset_ts())})
         if self._write_accounts(sender_id, accounts):
             tip = "（主账号）" if len(accounts) == 1 else f"（第 {len(accounts)} 个账号，非主账号）"
-            yield self._plain(event, 
+            yield event.plain_result(
                 f"绑定成功！\n已将您的账号与 CNTIR 玩家「{name}」(ID: {uid}) 绑定{tip}\n"
                 f"当前共绑定 {len(accounts)}/{self._max_bind} 个账号\n"
                 f"免输入查询默认使用主账号，切换：{self._p}切换 <序号/账号ID>")
         else:
-            yield self._plain(event, "绑定失败：绑定数据写入异常，请稍后重试")
+            yield event.plain_result("绑定失败：绑定数据写入异常，请稍后重试")
 
     async def do_unbind(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
         sender_id = str(event.get_sender_id())
         accounts = self._accounts(sender_id)
         if not accounts:
-            yield self._plain(event, "您还没有绑定任何 CNTIR 账号")
+            yield event.plain_result("您还没有绑定任何 CNTIR 账号")
             return
 
         if arg.lower() in ("all", "全部", "*"):
             self._write_accounts(sender_id, [])
-            yield self._plain(event, f"已解除全部绑定（共 {len(accounts)} 个账号）")
+            yield event.plain_result(f"已解除全部绑定（共 {len(accounts)} 个账号）")
             return
 
         idx = 0  # 默认解绑主账号
@@ -701,20 +680,20 @@ class CntirBotPlugin(Star):
                 matched = next((i for i, a in enumerate(accounts)
                                 if int(a["cntir_id"]) == int(arg)), None)
                 if matched is None:
-                    yield self._plain(event, f"绑定列表中没有账号 {arg}，可用：{self._p}我的 查看")
+                    yield event.plain_result(f"绑定列表中没有账号 {arg}，可用：{self._p}我的 查看")
                     return
                 idx = matched
             else:
-                yield self._plain(event, f"用法：{self._p}解绑 [序号/账号ID/全部]")
+                yield event.plain_result(f"用法：{self._p}解绑 [序号/账号ID/全部]")
                 return
 
         removed = accounts.pop(idx)
         if self._write_accounts(sender_id, accounts):
             rest = f"，剩余 {len(accounts)} 个账号" if accounts else "，已无绑定账号"
-            yield self._plain(event, f"解绑成功！\n已解除「{removed.get('name')}」"
+            yield event.plain_result(f"解绑成功！\n已解除「{removed.get('name')}」"
                                      f"(ID: {removed['cntir_id']}){rest}")
         else:
-            yield self._plain(event, "解绑失败：数据写入异常，请稍后重试")
+            yield event.plain_result("解绑失败：数据写入异常，请稍后重试")
 
     async def do_switch(self, event: AstrMessageEvent, arg: str = ""):
         """切换主账号：把指定账号移到列表首位。"""
@@ -722,13 +701,13 @@ class CntirBotPlugin(Star):
         sender_id = str(event.get_sender_id())
         accounts = self._accounts(sender_id)
         if not accounts:
-            yield self._plain(event, "您还没有绑定任何 CNTIR 账号")
+            yield event.plain_result("您还没有绑定任何 CNTIR 账号")
             return
         if len(accounts) == 1:
-            yield self._plain(event, "您只绑定了 1 个账号，无需切换")
+            yield event.plain_result("您只绑定了 1 个账号，无需切换")
             return
         if not arg:
-            yield self._plain(event, f"用法：{self._p}切换 <序号/账号ID>\n" + self._fmt_account_list(accounts))
+            yield event.plain_result(f"用法：{self._p}切换 <序号/账号ID>\n" + self._fmt_account_list(accounts))
             return
         idx = None
         if arg.isdigit() and 1 <= int(arg) <= len(accounts):
@@ -736,17 +715,17 @@ class CntirBotPlugin(Star):
         elif arg.isdigit():
             idx = next((i for i, a in enumerate(accounts) if int(a["cntir_id"]) == int(arg)), None)
         if idx is None:
-            yield self._plain(event, f"未找到「{arg}」，可用：{self._p}我的 查看绑定列表")
+            yield event.plain_result(f"未找到「{arg}」，可用：{self._p}我的 查看绑定列表")
             return
         if idx == 0:
-            yield self._plain(event, "该账号已经是主账号")
+            yield event.plain_result("该账号已经是主账号")
             return
         accounts.insert(0, accounts.pop(idx))
         if self._write_accounts(sender_id, accounts):
-            yield self._plain(event, 
+            yield event.plain_result(
                 f"已将「{accounts[0].get('name')}」(ID: {accounts[0]['cntir_id']}) 设为主账号")
         else:
-            yield self._plain(event, "切换失败：数据写入异常，请稍后重试")
+            yield event.plain_result("切换失败：数据写入异常，请稍后重试")
 
     @staticmethod
     def _fmt_account_list(accounts: List[Dict[str, Any]]) -> str:
@@ -760,9 +739,9 @@ class CntirBotPlugin(Star):
     async def do_my(self, event: AstrMessageEvent, arg: str = ""):
         accounts = self._accounts(event.get_sender_id())
         if not accounts:
-            yield self._plain(event, f"您还没有绑定 CNTIR 账号，使用「{self._p}绑定 <账号ID>」先绑定")
+            yield event.plain_result(f"您还没有绑定 CNTIR 账号，使用「{self._p}绑定 <账号ID>」先绑定")
             return
-        yield self._plain(event, 
+        yield event.plain_result(
             f"🔗 我的 CNTIR 绑定（{len(accounts)}/{self._max_bind}）\n"
             + self._fmt_account_list(accounts)
             + f"\n切换主账号：{self._p}切换 <序号/账号ID>")
@@ -770,15 +749,15 @@ class CntirBotPlugin(Star):
     async def do_query(self, event: AstrMessageEvent, arg: str = ""):
         uid, err = self._resolve_target_id(event, arg)
         if err:
-            yield self._plain(event, err)
+            yield event.plain_result(err)
             return
         try:
             user = await self.api_user(uid)
         except CntirApiError as e:
             if e.status == 404:
-                yield self._plain(event, f"玩家 {uid} 不存在，请检查 ID")
+                yield event.plain_result(f"玩家 {uid} 不存在，请检查 ID")
             else:
-                yield self._plain(event, f"查询失败：{e.message}")
+                yield event.plain_result(f"查询失败：{e.message}")
             return
 
         lines: List[str] = []
@@ -847,20 +826,20 @@ class CntirBotPlugin(Star):
         avatar = self._abs_url(user.get("avatar"))
         if avatar and self._cfg_bool("query_show_avatar", True):
             try:
-                yield self._chain(event, [Image.fromURL(avatar), Plain(text)])
+                yield event.chain_result([Image.fromURL(avatar), Plain(text)])
                 return
             except Exception as e:
                 logger.warning(f"头像发送失败: {e}")
-        yield self._plain(event, text)
+        yield event.plain_result(text)
 
     async def do_servers(self, event: AstrMessageEvent, arg: str = ""):
         try:
             servers = await self.api_servers()
         except CntirApiError as e:
-            yield self._plain(event, f"查询失败：{e.message}")
+            yield event.plain_result(f"查询失败：{e.message}")
             return
         if not servers:
-            yield self._plain(event, "当前没有可用的 CNTIR 服务器")
+            yield event.plain_result("当前没有可用的 CNTIR 服务器")
             return
         blocks = []
         for s in servers:
@@ -898,13 +877,13 @@ class CntirBotPlugin(Star):
             if desc:
                 block.append(f"📝 {desc}")
             blocks.append("\n".join(block))
-        yield self._plain(event, "🖥 CNTIR 服务器列表\n\n" + "\n\n".join(blocks))
+        yield event.plain_result("🖥 CNTIR 服务器列表\n\n" + "\n\n".join(blocks))
 
     async def do_stats(self, event: AstrMessageEvent, arg: str = ""):
         try:
             st = await self.api_stats()
         except CntirApiError as e:
-            yield self._plain(event, f"查询失败：{e.message}")
+            yield event.plain_result(f"查询失败：{e.message}")
             return
         text = (
             "📊 CNTIR 平台统计\n"
@@ -914,31 +893,31 @@ class CntirBotPlugin(Star):
             f"📦 累计运单: {st.get('deliveries', 0)} · 累计里程 {st.get('distance_km', 0)} km\n"
             f"🎉 即将开始的活动: {st.get('events_upcoming', 0)}"
         )
-        yield self._plain(event, text)
+        yield event.plain_result(text)
 
     async def do_locate(self, event: AstrMessageEvent, arg: str = ""):
         uid, err = self._resolve_target_id(event, arg)
         if err:
-            yield self._plain(event, err)
+            yield event.plain_result(err)
             return
         try:
             user = await self.api_user(uid)
             map_data = await self.api_map()
         except CntirApiError as e:
-            yield self._plain(event, f"定位失败：{e.message}")
+            yield event.plain_result(f"定位失败：{e.message}")
             return
 
         name = _clean(user.get("name")) or str(uid)
         online = user.get("online")
         if not (isinstance(online, dict) and online.get("code")):
-            yield self._plain(event, 
+            yield event.plain_result(
                 f"📍 玩家「{name}」当前离线\n"
                 f"💤 最后活跃: {_rel_time(user.get('last_seen'))}")
             return
 
         p = self._find_player_in_map(map_data, uid)
         if not p:
-            yield self._plain(event, 
+            yield event.plain_result(
                 f"玩家「{name}」在线（{online.get('name')}），但实时地图快照中暂无其坐标，"
                 f"地图约每 5 秒刷新一次，请稍后重试")
             return
@@ -986,25 +965,25 @@ class CntirBotPlugin(Star):
         url = await self._render_map(points, (px, pz))
         if url:
             try:
-                yield self._chain(event, [Image.fromURL(url), Plain(text)])
+                yield event.chain_result([Image.fromURL(url), Plain(text)])
                 return
             except Exception as e:
                 logger.warning(f"定位图片发送失败: {e}")
-        yield self._plain(event, text)
+        yield event.plain_result(text)
 
     async def do_traffic(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
         try:
             map_data = await self.api_map(arg.upper() if arg else None)
         except CntirApiError as e:
-            yield self._plain(event, f"路况查询失败：{e.message}")
+            yield event.plain_result(f"路况查询失败：{e.message}")
             return
 
         blocks: List[str] = []
         all_points: List[Dict[str, Any]] = []
         servers = map_data.get("servers", []) if isinstance(map_data, dict) else []
         if not servers:
-            yield self._plain(event, f"所选范围当前没有在线玩家" + (f"（{arg.upper()}）" if arg else ""))
+            yield event.plain_result(f"所选范围当前没有在线玩家" + (f"（{arg.upper()}）" if arg else ""))
             return
         for server in servers:
             players = server.get("players", [])
@@ -1049,11 +1028,11 @@ class CntirBotPlugin(Star):
                                          (cx, cz), zoom=4.0)
             if url:
                 try:
-                    yield self._chain(event, [Image.fromURL(url), Plain(text)])
+                    yield event.chain_result([Image.fromURL(url), Plain(text)])
                     return
                 except Exception as e:
                     logger.warning(f"路况图片发送失败: {e}")
-        yield self._plain(event, text)
+        yield event.plain_result(text)
 
     async def do_events(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
@@ -1075,13 +1054,13 @@ class CntirBotPlugin(Star):
                 data = await self.api_events("today", page)
                 tab = "today"
         except CntirApiError as e:
-            yield self._plain(event, f"查询活动失败：{e.message}")
+            yield event.plain_result(f"查询活动失败：{e.message}")
             return
         items = data.get("items", [])
         total = _fmt_int(data.get("total"))
         tab_cn = {"today": "24小时内", "upcoming": "即将开始", "featured": "精选", "past": "已结束"}.get(tab, tab)
         if not items:
-            yield self._plain(event, f"🎉 暂无{tab_cn}的活动")
+            yield event.plain_result(f"🎉 暂无{tab_cn}的活动")
             return
         blocks = [f"🎉 CNTIR 活动（{tab_cn}，共 {total} 场）"]
         for i, ev in enumerate(items[:5], start=1):
@@ -1105,25 +1084,25 @@ class CntirBotPlugin(Star):
                 body.append(f"👤 组织者: {_clean(organizer.get('name'))}")
             blocks.append(head + "\n" + "\n".join(body))
         footer = f"\n（第 {page} 页，回复「{self._p}活动 {page + 1}」查看更多）" if total > page * 18 else ""
-        yield self._plain(event, "\n\n".join(blocks) + footer)
+        yield event.plain_result("\n\n".join(blocks) + footer)
 
     async def do_news(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
         page = 1
         if arg:
             if not arg.isdigit():
-                yield self._plain(event, f"页码请输入数字，格式：{self._p}新闻 [页码]")
+                yield event.plain_result(f"页码请输入数字，格式：{self._p}新闻 [页码]")
                 return
             page = max(1, int(arg))
         try:
             data = await self.api_news(page, per=5)
         except CntirApiError as e:
-            yield self._plain(event, f"查询新闻失败：{e.message}")
+            yield event.plain_result(f"查询新闻失败：{e.message}")
             return
         items = data.get("items", [])
         total = _fmt_int(data.get("total"))
         if not items:
-            yield self._plain(event, "📰 暂无新闻")
+            yield event.plain_result("📰 暂无新闻")
             return
         blocks = [f"📰 CNTIR 新闻（第 {page} 页，共 {total} 篇）"]
         for i, n in enumerate(items, start=1):
@@ -1140,16 +1119,16 @@ class CntirBotPlugin(Star):
                 body.append(f"📝 {summary[:80]}" + ("…" if len(summary) > 80 else ""))
             blocks.append(title_line + "\n" + "\n".join(body))
         footer = f"\n（回复「{self._p}新闻 {page + 1}」查看更多）" if total > page * 5 else ""
-        yield self._plain(event, "\n\n".join(blocks) + footer)
+        yield event.plain_result("\n\n".join(blocks) + footer)
 
     async def do_announcements(self, event: AstrMessageEvent, arg: str = ""):
         try:
             anns = await self.api_announcements()
         except CntirApiError as e:
-            yield self._plain(event, f"查询公告失败：{e.message}")
+            yield event.plain_result(f"查询公告失败：{e.message}")
             return
         if not anns:
-            yield self._plain(event, "🔔 当前没有生效中的公告")
+            yield event.plain_result("🔔 当前没有生效中的公告")
             return
         blocks = ["🔔 CNTIR 公告"]
         for a in anns:
@@ -1157,7 +1136,7 @@ class CntirBotPlugin(Star):
             lines = [f"{level} {_clean(a.get('body'))}",
                      f"🕐 {_ts_to_bj(a.get('created'))} · 详情见 {_clean(a.get('url')) or '官网'}"]
             blocks.append("\n".join(lines))
-        yield self._plain(event, "\n\n".join(blocks))
+        yield event.plain_result("\n\n".join(blocks))
 
     async def do_vtc(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
@@ -1208,14 +1187,14 @@ class CntirBotPlugin(Star):
                 if recruiting is not None:
                     lines.append(f"🎯 招募: {'✅ 招募中' if recruiting else '❌ 未招募'}")
                 lines.append(f"📅 创建时间: {_ts_to_bj(vtc.get('created'), with_time=False)}")
-                yield self._plain(event, "\n".join(lines))
+                yield event.plain_result("\n".join(lines))
                 return
             # 列表 / 搜索
             data = await self.api_vtc_list(q=arg, page=1)
             items = data.get("items", [])
             total = _fmt_int(data.get("total"))
             if not items:
-                yield self._plain(event, f"🚚 没有找到车队" + (f"「{arg}」" if arg else ""))
+                yield event.plain_result(f"🚚 没有找到车队" + (f"「{arg}」" if arg else ""))
                 return
             head = f"🚚 CNTIR 车队" + (f"搜索「{arg}」" if arg else "列表") + f"（共 {total} 个）"
             blocks = [head]
@@ -1226,25 +1205,25 @@ class CntirBotPlugin(Star):
                     f"{i}. {v.get('id')} · {_clean(v.get('name'))}（{_clean(v.get('tag'))}）"
                     f" · {v.get('members', 0)}人 · {status} · {recruit}")
             blocks.append(f"查看详情：{self._p}车队 <车队ID>")
-            yield self._plain(event, "\n".join(blocks))
+            yield event.plain_result("\n".join(blocks))
         except CntirApiError as e:
             if e.status == 404:
-                yield self._plain(event, "车队不存在，请检查 ID")
+                yield event.plain_result("车队不存在，请检查 ID")
             else:
-                yield self._plain(event, f"查询车队失败：{e.message}")
+                yield event.plain_result(f"查询车队失败：{e.message}")
 
     async def do_news_detail(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
         if not arg.isdigit():
-            yield self._plain(event, f"用法：{self._p}新闻详情 <新闻ID>（ID 可在「{self._p}新闻」列表后到官网查看）")
+            yield event.plain_result(f"用法：{self._p}新闻详情 <新闻ID>（ID 可在「{self._p}新闻」列表后到官网查看）")
             return
         try:
             n = await self.api_news_detail(int(arg))
         except CntirApiError as e:
             if e.status == 404:
-                yield self._plain(event, f"新闻 {arg} 不存在")
+                yield event.plain_result(f"新闻 {arg} 不存在")
             else:
-                yield self._plain(event, f"查询新闻详情失败：{e.message}")
+                yield event.plain_result(f"查询新闻详情失败：{e.message}")
             return
         cat = CATEGORY_MAP.get(n.get("category"), n.get("category", ""))
         lines = [f"📰 {_clean(n.get('title'))}"]
@@ -1267,20 +1246,20 @@ class CntirBotPlugin(Star):
         if nav:
             lines.append("────────────\n" + "\n".join(nav))
         lines.append(f"🔗 查看全文：{PLUGIN_PAGE}/news/{arg}")
-        yield self._plain(event, "\n".join(lines))
+        yield event.plain_result("\n".join(lines))
 
     async def do_event_detail(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
         if not arg.isdigit():
-            yield self._plain(event, f"用法：{self._p}活动详情 <活动ID>（ID 见「{self._p}活动」列表）")
+            yield event.plain_result(f"用法：{self._p}活动详情 <活动ID>（ID 见「{self._p}活动」列表）")
             return
         try:
             ev = await self.api_event_detail(int(arg))
         except CntirApiError as e:
             if e.status == 404:
-                yield self._plain(event, f"活动 {arg} 不存在")
+                yield event.plain_result(f"活动 {arg} 不存在")
             else:
-                yield self._plain(event, f"查询活动详情失败：{e.message}")
+                yield event.plain_result(f"查询活动详情失败：{e.message}")
             return
         marks = []
         if ev.get("featured"):
@@ -1341,10 +1320,10 @@ class CntirBotPlugin(Star):
             v = _clean(ev.get(key))
             if v:
                 lines.append(f"{label}: {v}")
-        yield self._plain(event, "\n".join(lines))
+        yield event.plain_result("\n".join(lines))
 
     async def do_history(self, event: AstrMessageEvent, arg: str = ""):
-        """服务器在线历史：文本统计 + SVG 状态条图。"""
+        """服务器在线历史：在线率、最长连续在线时长、上下线切换次数等文本统计。"""
         hours = 24
         code = ""
         for token in (arg or "").split():
@@ -1364,16 +1343,16 @@ class CntirBotPlugin(Star):
         if default and code and _clean(default.get("code")).upper() == code.upper():
             name = _clean(default.get("name"))
         if not code:
-            yield self._plain(event, "用法：cnt历史 [服务器编号] [小时数]，例如：cnt历史 C1 24")
+            yield event.plain_result("用法：cnt历史 [服务器编号] [小时数]，例如：cnt历史 C1 24")
             return
         try:
             points = await self.api_server_history(code.upper(), hours)
         except CntirApiError as e:
-            yield self._plain(event, f"查询历史失败：{e.message}")
+            yield event.plain_result(f"查询历史失败：{e.message}")
             return
         points = [p for p in points if isinstance(p, dict)] if isinstance(points, list) else []
         if not points:
-            yield self._plain(event, f"服务器 {code.upper()} 最近 {hours} 小时没有历史采样数据")
+            yield event.plain_result(f"服务器 {code.upper()} 最近 {hours} 小时没有历史采样数据")
             return
 
         points.sort(key=lambda p: _fmt_int(p.get("t")))
@@ -1403,77 +1382,13 @@ class CntirBotPlugin(Star):
             f"🔁 上下线切换: {switches} 次\n"
             f"📶 当前状态: {'🟢 在线' if last_on else '⚫ 离线'}"
         )
-        if total >= 2:
-            html = self._build_history_html(title, code.upper(), hours, points)
-            try:
-                url = await self.html_render(html, {}, options={
-                    "type": "jpeg", "quality": 92, "full_page": True,
-                    "timeout": 8000, "animations": "disabled",
-                })
-                if url:
-                    yield self._chain(event, [Image.fromURL(url), Plain(text)])
-                    return
-            except Exception as e:
-                logger.warning(f"历史曲线渲染失败，降级为文字: {e}")
-        yield self._plain(event, text)
-
-    def _build_history_html(self, title: str, code: str, hours: int,
-                            points: List[Dict[str, Any]]) -> str:
-        """纯 SVG 生成在线状态条图（无外部依赖，渲染快且稳定）。"""
-        w, h = 960.0, 240.0
-        pad_l, pad_t, pad_b = 20.0, 20.0, 40.0
-        plot_w, plot_h = w - pad_l * 2, h - pad_t - pad_b
-        n = len(points)
-        bar_w = plot_w / n
-        rects = []
-        for i, p in enumerate(points):
-            x = pad_l + i * bar_w
-            if p.get("online"):
-                rects.append(
-                    f'<rect x="{x:.2f}" y="{pad_t:.2f}" width="{bar_w:.2f}" '
-                    f'height="{plot_h:.2f}" fill="#3fb950"/>')
-            else:
-                y = pad_t + plot_h - 6
-                rects.append(
-                    f'<rect x="{x:.2f}" y="{y:.2f}" width="{bar_w:.2f}" '
-                    f'height="6" fill="#4a4f57"/>')
-        t0, t1 = _fmt_int(points[0].get("t")), _fmt_int(points[-1].get("t"))
-        label0 = _ts_to_bj(t0)
-        label1 = _ts_to_bj(t1)
-        label_mid = _ts_to_bj((t0 + t1) // 2)
-        online_n = sum(1 for p in points if p.get("online"))
-        rate = online_n / n * 100
-        svg = (
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0f}" height="{h:.0f}" '
-            f'viewBox="0 0 {w:.0f} {h:.0f}">'
-            f'<rect width="{w:.0f}" height="{h:.0f}" fill="#1f2328"/>'
-            f'<line x1="{pad_l}" y1="{pad_t + plot_h}" x2="{pad_l + plot_w}" y2="{pad_t + plot_h}" '
-            f'stroke="#30363d" stroke-width="1"/>'
-            + "".join(rects) +
-            f'<text x="{pad_l}" y="{h - 14}" fill="#8b949e" font-size="14" '
-            f'font-family="sans-serif">{label0}</text>'
-            f'<text x="{w / 2:.0f}" y="{h - 14}" fill="#8b949e" font-size="14" text-anchor="middle" '
-            f'font-family="sans-serif">{label_mid}</text>'
-            f'<text x="{pad_l + plot_w:.0f}" y="{h - 14}" fill="#8b949e" font-size="14" '
-            f'text-anchor="end" font-family="sans-serif">{label1}</text>'
-            f'</svg>'
-        )
-        return (
-            '<html><body style="margin:0;padding:16px;background:#1f2328;'
-            'font-family:sans-serif;color:#c9d1d9;width:992px">'
-            f'<div style="font-size:20px;font-weight:bold;margin-bottom:4px">服务器在线历史 — {title}（{code}）</div>'
-            f'<div style="font-size:14px;color:#8b949e;margin-bottom:12px">'
-            f'最近 {hours} 小时 · {n} 个采样点 · 在线率 {rate:.1f}% · '
-            f'<span style="color:#3fb950">■</span> 在线 '
-            f'<span style="color:#4a4f57">■</span> 离线</div>'
-            f'{svg}</body></html>'
-        )
+        yield event.plain_result(text)
 
     async def do_version(self, event: AstrMessageEvent, arg: str = ""):
         try:
             v = await self.api_version()
         except CntirApiError as e:
-            yield self._plain(event, f"查询版本失败：{e.message}")
+            yield event.plain_result(f"查询版本失败：{e.message}")
             return
         ets2 = v.get("ets2") or []
         notes = v.get("notes") or []
@@ -1485,7 +1400,7 @@ class CntirBotPlugin(Star):
         )
         if notes:
             text += "\n📝 " + "\n   ".join(_clean(n) for n in notes[:5])
-        yield self._plain(event, text)
+        yield event.plain_result(text)
 
     # ================================================================
     # 路由层：单监听器 + 正则分发
@@ -1538,10 +1453,10 @@ class CntirBotPlugin(Star):
                 async for result in handler(event, arg):
                     yield result
             except CntirApiError as e:
-                yield self._plain(event, f"出错了：{e.message}")
+                yield event.plain_result(f"出错了：{e.message}")
             except Exception as e:
                 logger.error(f"命令处理异常 [{handler_name}]: {e}", exc_info=True)
-                yield self._plain(event, "处理命令时出现内部错误，请稍后重试")
+                yield event.plain_result("处理命令时出现内部错误，请稍后重试")
             return
 
     # ----------------------------- AstrBot 指令桩（仅用于指令列表展示） -----------------------------
