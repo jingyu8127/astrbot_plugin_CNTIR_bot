@@ -95,7 +95,7 @@ except ImportError:  # 允许脱离 AstrBot 环境 import（单元测试 / 静�
 # ----------------------------- 常量 -----------------------------
 PLUGIN_NAME = "astrbot_plugin_CNTIR_bot"
 API_BASE = "https://cntir.ltchedui.com"
-USER_AGENT = "AstrBot-CNTIR-Plugin/1.0.0"
+USER_AGENT = "AstrBot-CNTIR-Plugin/1.0.1"
 PLUGIN_PAGE = "https://cntir.ltchedui.com"
 
 # ETS2 底图瓦片（默认源与故障回退源，均为公开镜像）
@@ -246,7 +246,7 @@ class _TtlCache:
             return value
 
 
-@register("astrbot_plugin_CNTIR_bot", "YourName", "CNTIR 查询机器人（欧卡2联机平台）", "1.0.0",
+@register("astrbot_plugin_CNTIR_bot", "鲸鱼", "CNTIR 查询机器人（欧卡2联机平台）", "1.0.1",
           "https://cntir.ltchedui.com")
 class CntirBotPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -301,12 +301,21 @@ class CntirBotPlugin(Star):
         return str(v) if v is not None else default
 
     @property
+    def _cache_ttl(self) -> int:
+        """全部接口统一的缓存时长（秒），由 cache_ttl_seconds 一项控制。"""
+        return max(5, self._cfg_int("cache_ttl_seconds", 30))
+
+    def _ttl(self, minimum: int = 0) -> int:
+        """统一缓存时长，并按接口下限钳制（官方限频：服务器 15s、地图 5s）。"""
+        return max(minimum, self._cache_ttl)
+
+    @property
     def _servers_ttl(self) -> int:
-        return max(15, self._cfg_int("servers_cache_seconds", 15))
+        return self._ttl(15)
 
     @property
     def _map_ttl(self) -> int:
-        return max(5, self._cfg_int("map_cache_seconds", 5))
+        return self._ttl(5)
 
     # ----------------------------- HTTP 层 -----------------------------
     async def _fetch_json(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
@@ -348,7 +357,8 @@ class CntirBotPlugin(Star):
         hours = max(1, min(336, hours))
         key = f"/api/servers/{code}/history?hours={hours}"
         return await self._cache.get_or_set(
-            key, 60, lambda: self._fetch_json(f"/api/servers/{code}/history", {"hours": hours}))
+            key, self._cache_ttl,
+            lambda: self._fetch_json(f"/api/servers/{code}/history", {"hours": hours}))
 
     async def api_map(self, server: Optional[str] = None) -> Dict[str, Any]:
         key = f"/api/map?server={server or ''}"
@@ -357,52 +367,45 @@ class CntirBotPlugin(Star):
 
     async def api_stats(self) -> Dict[str, Any]:
         return await self._cache.get_or_set(
-            "/api/stats", 30, lambda: self._fetch_json("/api/stats"))
+            "/api/stats", self._cache_ttl, lambda: self._fetch_json("/api/stats"))
 
     async def api_user(self, uid: int) -> Dict[str, Any]:
         key = f"/api/users/{uid}"
-        ttl = max(10, self._cfg_int("user_cache_seconds", 30))
         return await self._cache.get_or_set(
-            key, ttl, lambda: self._fetch_json(f"/api/users/{uid}"))
+            key, self._cache_ttl, lambda: self._fetch_json(f"/api/users/{uid}"))
 
     async def api_news(self, page: int = 1, per: int = 5, category: str = "") -> Dict[str, Any]:
         per = max(1, min(30, per))
         key = f"/api/news?p={page}&per={per}&c={category}"
-        ttl = max(30, self._cfg_int("list_cache_seconds", 60))
         params: Dict[str, Any] = {"page": page, "per": per}
         if category:
             params["category"] = category
         return await self._cache.get_or_set(
-            key, ttl, lambda: self._fetch_json("/api/news", params))
+            key, self._cache_ttl, lambda: self._fetch_json("/api/news", params))
 
     async def api_news_detail(self, news_id: int) -> Dict[str, Any]:
         key = f"/api/news/{news_id}"
-        ttl = max(60, self._cfg_int("list_cache_seconds", 60)) * 5
         return await self._cache.get_or_set(
-            key, ttl, lambda: self._fetch_json(f"/api/news/{news_id}"))
+            key, self._cache_ttl, lambda: self._fetch_json(f"/api/news/{news_id}"))
 
     async def api_announcements(self) -> List[Dict[str, Any]]:
-        ttl = max(30, self._cfg_int("list_cache_seconds", 60))
         return await self._cache.get_or_set(
-            "/api/announcements", ttl, lambda: self._fetch_json("/api/announcements"))
+            "/api/announcements", self._cache_ttl, lambda: self._fetch_json("/api/announcements"))
 
     async def api_events(self, tab: str = "upcoming", page: int = 1) -> Dict[str, Any]:
         tab = tab if tab in ("featured", "today", "upcoming", "past") else "upcoming"
         key = f"/api/events?tab={tab}&page={page}"
-        ttl = max(30, self._cfg_int("list_cache_seconds", 60))
         return await self._cache.get_or_set(
-            key, ttl, lambda: self._fetch_json("/api/events", {"tab": tab, "page": page}))
+            key, self._cache_ttl, lambda: self._fetch_json("/api/events", {"tab": tab, "page": page}))
 
     async def api_event_detail(self, event_id: int) -> Dict[str, Any]:
         key = f"/api/events/{event_id}"
-        ttl = max(30, self._cfg_int("list_cache_seconds", 60))
         return await self._cache.get_or_set(
-            key, ttl, lambda: self._fetch_json(f"/api/events/{event_id}"))
+            key, self._cache_ttl, lambda: self._fetch_json(f"/api/events/{event_id}"))
 
     async def api_vtc_list(self, q: str = "", page: int = 1, recruiting: bool = False,
                            sort: str = "") -> Dict[str, Any]:
         key = f"/api/vtc?q={q}&p={page}&r={int(recruiting)}&s={sort}"
-        ttl = max(30, self._cfg_int("list_cache_seconds", 60))
         params: Dict[str, Any] = {"page": page}
         if q:
             params["q"] = q
@@ -411,17 +414,16 @@ class CntirBotPlugin(Star):
         if sort in ("members", "new", "name"):
             params["sort"] = sort
         return await self._cache.get_or_set(
-            key, ttl, lambda: self._fetch_json("/api/vtc", params))
+            key, self._cache_ttl, lambda: self._fetch_json("/api/vtc", params))
 
     async def api_vtc_detail(self, vtc_id: int) -> Dict[str, Any]:
         key = f"/api/vtc/{vtc_id}"
-        ttl = max(30, self._cfg_int("list_cache_seconds", 60))
         return await self._cache.get_or_set(
-            key, ttl, lambda: self._fetch_json(f"/api/vtc/{vtc_id}"))
+            key, self._cache_ttl, lambda: self._fetch_json(f"/api/vtc/{vtc_id}"))
 
     async def api_version(self) -> Dict[str, Any]:
         return await self._cache.get_or_set(
-            "/api/version", 600, lambda: self._fetch_json("/api/version"))
+            "/api/version", self._cache_ttl, lambda: self._fetch_json("/api/version"))
 
     # ----------------------------- 绑定系统（多账号） -----------------------------
     # 存储结构：{sender_id: {"accounts": [{cntir_id, name, bind_time}, ...]}}
@@ -1321,7 +1323,7 @@ class CntirBotPlugin(Star):
         yield event.plain_result("\n".join(lines))
 
     async def do_history(self, event: AstrMessageEvent, arg: str = ""):
-        """服务器在线历史：文本统计 + SVG 状态条图。"""
+        """服务器在线历史：在线率、最长连续在线时长、上下线切换次数等文本统计。"""
         hours = 24
         code = ""
         for token in (arg or "").split():
@@ -1380,71 +1382,7 @@ class CntirBotPlugin(Star):
             f"🔁 上下线切换: {switches} 次\n"
             f"📶 当前状态: {'🟢 在线' if last_on else '⚫ 离线'}"
         )
-        if total >= 2:
-            html = self._build_history_html(title, code.upper(), hours, points)
-            try:
-                url = await self.html_render(html, {}, options={
-                    "type": "jpeg", "quality": 92, "full_page": True,
-                    "timeout": 8000, "animations": "disabled",
-                })
-                if url:
-                    yield event.chain_result([Image.fromURL(url), Plain(text)])
-                    return
-            except Exception as e:
-                logger.warning(f"历史曲线渲染失败，降级为文字: {e}")
         yield event.plain_result(text)
-
-    def _build_history_html(self, title: str, code: str, hours: int,
-                            points: List[Dict[str, Any]]) -> str:
-        """纯 SVG 生成在线状态条图（无外部依赖，渲染快且稳定）。"""
-        w, h = 960.0, 240.0
-        pad_l, pad_t, pad_b = 20.0, 20.0, 40.0
-        plot_w, plot_h = w - pad_l * 2, h - pad_t - pad_b
-        n = len(points)
-        bar_w = plot_w / n
-        rects = []
-        for i, p in enumerate(points):
-            x = pad_l + i * bar_w
-            if p.get("online"):
-                rects.append(
-                    f'<rect x="{x:.2f}" y="{pad_t:.2f}" width="{bar_w:.2f}" '
-                    f'height="{plot_h:.2f}" fill="#3fb950"/>')
-            else:
-                y = pad_t + plot_h - 6
-                rects.append(
-                    f'<rect x="{x:.2f}" y="{y:.2f}" width="{bar_w:.2f}" '
-                    f'height="6" fill="#4a4f57"/>')
-        t0, t1 = _fmt_int(points[0].get("t")), _fmt_int(points[-1].get("t"))
-        label0 = _ts_to_bj(t0)
-        label1 = _ts_to_bj(t1)
-        label_mid = _ts_to_bj((t0 + t1) // 2)
-        online_n = sum(1 for p in points if p.get("online"))
-        rate = online_n / n * 100
-        svg = (
-            f'<svg xmlns="http://www.w3.org/2000/svg" width="{w:.0f}" height="{h:.0f}" '
-            f'viewBox="0 0 {w:.0f} {h:.0f}">'
-            f'<rect width="{w:.0f}" height="{h:.0f}" fill="#1f2328"/>'
-            f'<line x1="{pad_l}" y1="{pad_t + plot_h}" x2="{pad_l + plot_w}" y2="{pad_t + plot_h}" '
-            f'stroke="#30363d" stroke-width="1"/>'
-            + "".join(rects) +
-            f'<text x="{pad_l}" y="{h - 14}" fill="#8b949e" font-size="14" '
-            f'font-family="sans-serif">{label0}</text>'
-            f'<text x="{w / 2:.0f}" y="{h - 14}" fill="#8b949e" font-size="14" text-anchor="middle" '
-            f'font-family="sans-serif">{label_mid}</text>'
-            f'<text x="{pad_l + plot_w:.0f}" y="{h - 14}" fill="#8b949e" font-size="14" '
-            f'text-anchor="end" font-family="sans-serif">{label1}</text>'
-            f'</svg>'
-        )
-        return (
-            '<html><body style="margin:0;padding:16px;background:#1f2328;'
-            'font-family:sans-serif;color:#c9d1d9;width:992px">'
-            f'<div style="font-size:20px;font-weight:bold;margin-bottom:4px">服务器在线历史 — {title}（{code}）</div>'
-            f'<div style="font-size:14px;color:#8b949e;margin-bottom:12px">'
-            f'最近 {hours} 小时 · {n} 个采样点 · 在线率 {rate:.1f}% · '
-            f'<span style="color:#3fb950">■</span> 在线 '
-            f'<span style="color:#4a4f57">■</span> 离线</div>'
-            f'{svg}</body></html>'
-        )
 
     async def do_version(self, event: AstrMessageEvent, arg: str = ""):
         try:
