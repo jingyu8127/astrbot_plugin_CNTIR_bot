@@ -4,3 +4,5 @@ desc: CNTIR（欧洲卡车模拟2联机平台）数据查询：绑定账号、�
 version: v1.0.1
 author: 鲸鱼
 repo: https://github.com/jingyu8127/astrbot_plugin_CNTIR_bot
+support_platforms:
+  - qq_official
