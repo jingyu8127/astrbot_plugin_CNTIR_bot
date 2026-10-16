@@ -628,9 +628,9 @@ class CntirBotPlugin(Star):
             ("📊", "统计", "平台数据统计"),
             ("🚚", "车队 [ID/关键词]", "车队列表/搜索/详情"),
             ("🎉", "活动 [今日/精选/结束/页码]", "活动列表"),
-            ("🎉", "活动详情 <ID>", "活动详情"),
+            ("🎉", "活动详情 [活动ID]", "活动详情（不填看最近一场）"),
             ("📰", "新闻 [页码]", "新闻列表"),
-            ("📰", "新闻详情 <ID>", "新闻正文"),
+            ("📰", "新闻详情 [新闻ID]", "新闻正文（不填看最新一篇）"),
             ("🔔", "公告", "全站公告"),
             ("⚙️", "版本", "版本信息"),
             ("❓", "菜单", "本帮助"),
@@ -1092,7 +1092,7 @@ class CntirBotPlugin(Star):
             if ev.get("official"):
                 marks += "[官方] "
             kind = KIND_MAP.get(ev.get("kind"), ev.get("kind", ""))
-            head = f"{i}. {marks}{_clean(ev.get('title'))} · {kind}"
+            head = f"{i}.（活动ID {ev.get('id')}）{marks}{_clean(ev.get('title'))} · {kind}"
             body = [
                 f"🕐 开始: {_ts_to_bj(ev.get('start_at'))}"
                 + (f"（集合 {_ts_to_bj(ev.get('meetup_at'))}）" if ev.get("meetup_at") else ""),
@@ -1105,7 +1105,9 @@ class CntirBotPlugin(Star):
             if isinstance(organizer, dict) and organizer.get("name"):
                 body.append(f"👤 组织者: {_clean(organizer.get('name'))}")
             blocks.append(head + "\n" + "\n".join(body))
-        footer = f"\n（第 {page} 页，回复「{self._p}活动 {page + 1}」查看更多）" if total > page * 18 else ""
+        footer = f"\n查看详情：{self._p}活动详情 <活动ID>"
+        if total > page * 18:
+            footer += f"\n（第 {page} 页，回复「{self._p}活动 {page + 1}」查看更多）"
         yield event.plain_result("\n\n".join(blocks) + footer)
 
     async def do_news(self, event: AstrMessageEvent, arg: str = ""):
@@ -1130,7 +1132,7 @@ class CntirBotPlugin(Star):
         for i, n in enumerate(items, start=1):
             cat = CATEGORY_MAP.get(n.get("category"), n.get("category", ""))
             pin = "📌" if n.get("pinned") else ""
-            title_line = f"{i}. {pin}[{cat}] {_clean(n.get('title'))}"
+            title_line = f"{i}.（新闻ID {n.get('id')}）{pin}[{cat}] {_clean(n.get('title'))}"
             meta_parts = [_ts_to_bj(n.get("created"), with_time=False)]
             author = n.get("author") or {}
             if isinstance(author, dict) and author.get("name"):
@@ -1140,7 +1142,9 @@ class CntirBotPlugin(Star):
             if summary:
                 body.append(f"📝 {summary[:80]}" + ("…" if len(summary) > 80 else ""))
             blocks.append(title_line + "\n" + "\n".join(body))
-        footer = f"\n（回复「{self._p}新闻 {page + 1}」查看更多）" if total > page * 5 else ""
+        footer = f"\n查看全文：{self._p}新闻详情 <新闻ID>"
+        if total > page * 5:
+            footer += f"\n（回复「{self._p}新闻 {page + 1}」查看更多）"
         yield event.plain_result("\n\n".join(blocks) + footer)
 
     async def do_announcements(self, event: AstrMessageEvent, arg: str = ""):
@@ -1236,8 +1240,19 @@ class CntirBotPlugin(Star):
 
     async def do_news_detail(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
+        if not arg:
+            # 不填 ID 时自动看最新一篇，省去记 ID
+            try:
+                items = (await self.api_news(1, 5)).get("items") or []
+            except CntirApiError as e:
+                yield event.plain_result(f"查询新闻详情失败：{e.message}")
+                return
+            if not items:
+                yield event.plain_result("📰 暂无新闻")
+                return
+            arg = str(items[0].get("id"))
         if not arg.isdigit():
-            yield event.plain_result(f"用法：{self._p}新闻详情 <新闻ID>（ID 可在「{self._p}新闻」列表后到官网查看）")
+            yield event.plain_result(f"用法：{self._p}新闻详情 [新闻ID]（不填为最新一篇）")
             return
         try:
             n = await self.api_news_detail(int(arg))
@@ -1272,8 +1287,22 @@ class CntirBotPlugin(Star):
 
     async def do_event_detail(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
+        if not arg:
+            # 不填 ID 时自动看最近一场活动，省去记 ID
+            try:
+                for tab in ("today", "upcoming"):
+                    items = (await self.api_events(tab, 1)).get("items") or []
+                    if items:
+                        arg = str(items[0].get("id"))
+                        break
+            except CntirApiError as e:
+                yield event.plain_result(f"查询活动详情失败：{e.message}")
+                return
+            if not arg:
+                yield event.plain_result("🎉 最近没有可查看的活动")
+                return
         if not arg.isdigit():
-            yield event.plain_result(f"用法：{self._p}活动详情 <活动ID>（ID 见「{self._p}活动」列表）")
+            yield event.plain_result(f"用法：{self._p}活动详情 [活动ID]（不填为最近一场）")
             return
         try:
             ev = await self.api_event_detail(int(arg))
