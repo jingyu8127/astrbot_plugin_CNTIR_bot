@@ -484,6 +484,28 @@ class CntirBotPlugin(Star):
 
     # ----------------------------- 消息辅助 -----------------------------
     @staticmethod
+    def _keep_text(result):
+        """纯文本回复保持以文字形式发出。
+
+        AstrBot 的「文本转图像」功能会把较长的文本自动渲染成图片（render 阶段
+        result_decorate.stage 处理），插件在此声明文本类回复无需转图；
+        含图片的回复（定位、路况等）不做任何干预，照常发送图片。
+        """
+        try:
+            chain = getattr(result, "chain", None) or []
+            has_image = False
+            for comp in chain:
+                # 类型名兜底，避免不同 AstrBot 版本下 Image 类不一致时误判
+                if isinstance(comp, Image) or "image" in type(comp).__name__.lower():
+                    has_image = True
+                    break
+            if not has_image:
+                result.use_t2i_ = False
+        except Exception:
+            pass
+        return result
+
+    @staticmethod
     def _extract_at_id(event: AstrMessageEvent) -> Optional[str]:
         """解析消息链中的 @ 目标用户 ID。"""
         message_obj = getattr(event, "message_obj", None)
@@ -1451,12 +1473,12 @@ class CntirBotPlugin(Star):
             handler = getattr(self, handler_name)
             try:
                 async for result in handler(event, arg):
-                    yield result
+                    yield self._keep_text(result)
             except CntirApiError as e:
-                yield event.plain_result(f"出错了：{e.message}")
+                yield self._keep_text(event.plain_result(f"出错了：{e.message}"))
             except Exception as e:
                 logger.error(f"命令处理异常 [{handler_name}]: {e}", exc_info=True)
-                yield event.plain_result("处理命令时出现内部错误，请稍后重试")
+                yield self._keep_text(event.plain_result("处理命令时出现内部错误，请稍后重试"))
             return
 
     # ----------------------------- AstrBot 指令桩（仅用于指令列表展示） -----------------------------
