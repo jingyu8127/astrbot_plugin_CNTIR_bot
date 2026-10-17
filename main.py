@@ -96,7 +96,7 @@ except ImportError:  # 允许脱离 AstrBot 环境 import（单元测试 / 静�
 # ----------------------------- 常量 -----------------------------
 PLUGIN_NAME = "astrbot_plugin_CNTIR_bot"
 API_BASE = "https://cntir.ltchedui.com"
-USER_AGENT = "AstrBot-CNTIR-Plugin/1.0.1"
+USER_AGENT = "AstrBot-CNTIR-Plugin/1.0.2"
 PLUGIN_PAGE = "https://cntir.ltchedui.com"
 
 # ETS2 底图瓦片（默认源与故障回退源，均为公开镜像）
@@ -257,7 +257,7 @@ class _TtlCache:
             return value
 
 
-@register("astrbot_plugin_CNTIR_bot", "鲸鱼", "CNTIR 查询机器人（欧卡2联机平台）", "1.0.1",
+@register("astrbot_plugin_CNTIR_bot", "鲸鱼", "CNTIR 查询机器人（欧卡2联机平台）", "1.0.2",
           "https://cntir.ltchedui.com")
 class CntirBotPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
