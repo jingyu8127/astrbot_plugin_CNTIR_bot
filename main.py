@@ -17,6 +17,7 @@ astrbot_plugin_CNTIR_bot — CNTIR（欧洲卡车模拟 2 联机平台）查询�
 """
 
 import asyncio
+import base64
 import json
 import math
 import os
@@ -264,6 +265,7 @@ class CntirBotPlugin(Star):
         self.config = config or {}
         self.session: Optional[aiohttp.ClientSession] = None
         self._cache = _TtlCache()
+        self._tile_cache: Dict[str, str] = {}
 
         # 数据目录：AstrBot 规范位置，插件更新不丢数据
         self.data_dir = os.path.join(os.getcwd(), "data", "plugin_data", PLUGIN_NAME)
@@ -567,32 +569,136 @@ class CntirBotPlugin(Star):
         return f"{API_BASE}/{p.lstrip('/')}"
 
     # ----------------------------- 渲染层 -----------------------------
+    MAP_W = 1000          # 地图视口宽（与 templates/locate.html 保持一致）
+    MAP_H = 800           # 地图视口高
+    TILE_SIZE = 512       # 瓦片像素（ETS2 底图为 512px 瓦片）
+
+    async def _fetch_tile_uri(self, url: str) -> Optional[str]:
+        """下载单张瓦片并转成 data URI（内存缓存），失败返回 None。"""
+        cached = self._tile_cache.get(url)
+        if cached:
+            return cached
+        if not self.session:
+            return None
+        try:
+            # 瓦片镜像的证书与域名不匹配（Hostname mismatch），严格校验会直接失败，
+            # 表现为「地图有时空白 / 只有一半」。仅对公开瓦片图片放宽校验，其余请求仍严格校验。
+            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=10),
+                                        ssl=False) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.read()
+        except Exception:
+            return None
+        if not data:
+            return None
+        uri = "data:image/png;base64," + base64.b64encode(data).decode()
+        if len(self._tile_cache) >= 400:
+            self._tile_cache.clear()
+        self._tile_cache[url] = uri
+        return uri
+
+    def _fit_zoom(self, xs: List[float], zs: List[float], margin: float = 0.85) -> float:
+        """按点位范围选缩放级别（2~8），保证所有点都落在画面内（避免只看到一两个点）。"""
+        try:
+            span = max(max(xs) - min(xs), max(zs) - min(zs)) / 1.609055
+        except (ValueError, ZeroDivisionError):
+            return 8.0
+        if span <= 0:
+            return 8.0
+        zoom = math.floor(8 + math.log2(self.MAP_W * margin / span))
+        return float(max(2, min(8, zoom)))
+
+    async def _tile_uri(self, primary: str, fallback: str) -> Optional[str]:
+        uri = await self._fetch_tile_uri(primary)
+        if uri is None and fallback:
+            uri = await self._fetch_tile_uri(fallback)
+        return uri
+
     async def _render_map(self, players: List[Dict[str, Any]], center: Tuple[float, float],
                           zoom: float = 8.0) -> Optional[str]:
         """渲染 ETS2 底图 + 玩家点，成功返回图片 URL，失败返回 None（由调用方降级）。
 
+        底图改为「先在 Python 里下载瓦片并内联成 data URI，再用静态 HTML 摆位」，
+        不再依赖 Leaflet/JS 异步取瓦片，避免截图时地图空白或只渲染一半。
         players: [{"axisX", "axisZ", "me"}]；center: (x, z)
-        坐标转换：CNTIR 世界坐标（米）→ tmp/Trucky 同款像素换算（除数 1.609055 + 平移）。
+        坐标换算：CNTIR 世界坐标（米）→ z8 瓦片像素（÷1.609055 + 平移），再按 zoom 缩放。
         """
-        if not self._cfg_bool("map_enable", True) or not players:
+        if not self._cfg_bool("map_enable", True) or not players or not self.session:
             return None
         try:
-            tmpl_path = os.path.join(self.tpl_dir, "locate.html")
-            tmpl = await asyncio.to_thread(self._read_file, tmpl_path)
+            z = max(2, min(8, int(round(zoom))))
+            scale = 2 ** (8 - z)          # z8 像素 → 当前缩放级别的像素
+            tile_px = self.TILE_SIZE
+            max_idx = 2 ** z - 1
+
+            def to_px(x: Any, y: Any) -> Tuple[float, float]:
+                return ((float(x or 0) / 1.609055 + 70272) / scale,
+                        (float(y or 0) / 1.609055 + 76157) / scale)
+
+            cx, cz = to_px(center[0], center[1])
+            left = cx - self.MAP_W / 2
+            top = cz - self.MAP_H / 2
+
+            tile_tmpl = self._cfg_str("tile_url_ets", "").strip() or DEFAULT_TILE_URL
+            jobs: List[Tuple[int, int, str, str]] = []
+            for i in range(int(math.floor(left / tile_px)),
+                           int(math.floor((left + self.MAP_W) / tile_px)) + 1):
+                for j in range(int(math.floor(top / tile_px)),
+                               int(math.floor((top + self.MAP_H) / tile_px)) + 1):
+                    if not (0 <= i <= max_idx and 0 <= j <= max_idx):
+                        continue
+                    try:
+                        primary = tile_tmpl.format(z=z, x=i, y=j)
+                    except Exception:
+                        primary = tile_tmpl
+                    try:
+                        fallback = FALLBACK_TILE_URL.format(z=z, x=i, y=j)
+                    except Exception:
+                        fallback = FALLBACK_TILE_URL
+                    jobs.append((i, j, primary, fallback))
+            if not jobs:
+                return None
+
+            uris = await asyncio.gather(*[
+                self._tile_uri(p, f) for _i, _j, p, f in jobs
+            ])
+            tiles = []
+            for (i, j, _p, _f), uri in zip(jobs, uris):
+                if not uri:
+                    continue
+                tiles.append({
+                    "src": uri,
+                    "left": round(i * tile_px - left, 1),
+                    "top": round(j * tile_px - top, 1),
+                })
+            if not tiles:
+                return None
+
+            markers = []
+            for p in players:
+                mx, my = to_px(p.get("axisX"), p.get("axisZ"))
+                x, y = mx - left, my - top
+                if not (-16 <= x <= self.MAP_W + 16 and -16 <= y <= self.MAP_H + 16):
+                    continue
+                me = bool(p.get("me"))
+                markers.append({
+                    "x": round(x, 1), "y": round(y, 1),
+                    "size": 14 if me else 8,
+                    "color": "#57bd00" if me else "#3ca7ff",
+                    "me": me,
+                })
+
+            tmpl = await asyncio.to_thread(
+                self._read_file, os.path.join(self.tpl_dir, "locate.html"))
             if not tmpl:
                 return None
-            tile_url = self._cfg_str("tile_url_ets", "").strip() or DEFAULT_TILE_URL
-            data = {
-                "tile_url": tile_url,
-                "fallback_url": FALLBACK_TILE_URL,
-                "center_x": float(center[0]),
-                "center_z": float(center[1]),
-                "zoom": zoom,
-                "players": players,
-            }
-            url = await self.html_render(tmpl, data, options={
+            url = await self.html_render(tmpl, {
+                "width": self.MAP_W, "height": self.MAP_H,
+                "tiles": tiles, "markers": markers,
+            }, options={
                 "type": "jpeg", "quality": 92, "full_page": True,
-                "timeout": 8000, "animations": "disabled",
+                "timeout": 10000, "animations": "disabled",
             })
             return url if isinstance(url, str) and url else None
         except Exception as e:
@@ -1219,7 +1325,11 @@ class CntirBotPlugin(Star):
         for d, q in nearby[:max_cnt]:
             points.append({"axisX": float(q.get("x") or 0), "axisZ": float(q.get("z") or 0), "me": 0})
         text = "\n".join(lines)
-        url = await self._render_map(points, (px, pz))
+        xs = [p["axisX"] for p in points]
+        zs = [p["axisZ"] for p in points]
+        cx = (min(xs) + max(xs)) / 2
+        cz = (min(zs) + max(zs)) / 2
+        url = await self._render_map(points, (cx, cz), zoom=self._fit_zoom(xs, zs))
         if url:
             try:
                 yield event.chain_result([Image.fromURL(url), Plain(text)])
@@ -1279,10 +1389,12 @@ class CntirBotPlugin(Star):
 
         text = "🛣 CNTIR 实时路况\n\n" + "\n\n".join(blocks)
         if len(all_points) >= 2:
-            cx = sum(p["axisX"] for p in all_points) / len(all_points)
-            cz = sum(p["axisZ"] for p in all_points) / len(all_points)
+            xs = [p["axisX"] for p in all_points]
+            zs = [p["axisZ"] for p in all_points]
+            cx = (min(xs) + max(xs)) / 2
+            cz = (min(zs) + max(zs)) / 2
             url = await self._render_map(all_points[: self._cfg_int("max_map_points", 400)],
-                                         (cx, cz), zoom=4.0)
+                                         (cx, cz), zoom=self._fit_zoom(xs, zs))
             if url:
                 try:
                     yield event.chain_result([Image.fromURL(url), Plain(text)])
