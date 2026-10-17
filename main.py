@@ -481,6 +481,12 @@ class CntirBotPlugin(Star):
         return max(1, min(10, self._cfg_int("max_bind_count", 3)))
 
     @property
+    def _map_points_limit(self) -> int:
+        """路况整图最多渲染的点数（钳制到 50-1000，防止图糊满或渲染超时）。"""
+        return max(50, min(self.MAP_POINTS_MAX,
+                           self._cfg_int("max_map_points", self.MAP_POINTS_MAX)))
+
+    @property
     def _p(self) -> str:
         """提示文案中的命令前缀：开启免前缀时为空串。"""
         return "" if self._cfg_bool("enable_no_prefix", True) else "cnt"
@@ -591,6 +597,8 @@ class CntirBotPlugin(Star):
     WORLD_SIZE = 900      # 整图模式边长（正方形欧洲地图）
     WORLD_BG = (46, 58, 78)  # 整图底色（深蓝，与参考图一致）
     TILE_CACHE_BYTES = 24 * 1024 * 1024  # 瓦片内存缓存上限（整图模式要缓存几十张瓦片）
+    NEARBY_MAX_CAP = 50   # 定位文字里最多列出的附近玩家数（消息长度上限）
+    MAP_POINTS_MAX = 1000  # 整图最多渲染的玩家点数（再多会糊成一片）
 
     async def _fetch_tile_bytes(self, url: str) -> Optional[bytes]:
         """下载单张瓦片的原始字节（内存缓存），失败重试一次。"""
@@ -1484,7 +1492,8 @@ class CntirBotPlugin(Star):
 
         # 附近玩家（同账号排除，按配置半径）
         radius = max(500, self._cfg_int("nearby_radius_m", 5000))
-        max_cnt = max(1, self._cfg_int("nearby_max_count", 10))
+        max_cnt = max(1, min(self.NEARBY_MAX_CAP,
+                             self._cfg_int("nearby_max_count", self.NEARBY_MAX_CAP)))
         nearby: List[Tuple[float, Dict[str, Any]]] = []
         try:
             for server in map_data.get("servers", []):
@@ -1576,7 +1585,7 @@ class CntirBotPlugin(Star):
             if hot_txt:
                 block.append(f"🔥 热点区域（5km 网格）: {hot_txt}")
             blocks.append("\n".join(block))
-            for q in players[: max(50, self._cfg_int("max_map_points", 400))]:
+            for q in players[: self._map_points_limit]:
                 all_points.append({"axisX": float(q.get("x") or 0),
                                    "axisZ": float(q.get("z") or 0), "me": 0})
 
@@ -1584,7 +1593,7 @@ class CntirBotPlugin(Star):
         if all_points:
             # 路况发整张欧洲地图：所有在线玩家一眼看全，不再按点范围裁视口
             url = await self._render_world_map(
-                all_points[: max(50, self._cfg_int("max_map_points", 400))],
+                all_points[: self._map_points_limit],
                 self._cfg_int("world_map_zoom", 2))
             if url:
                 try:

@@ -1,62 +1,22 @@
 {
-  "api_timeout_seconds": {
-    "type": "int",
-    "default": 10,
-    "description": "CNTIR API 请求超时时间（秒）",
-    "hint": "建议 5-15 秒"
-  },
-  "cache_ttl_seconds": {
-    "type": "int",
-    "default": 30,
-    "description": "统一的接口缓存时间（秒）。同时作用于服务器状态、实时地图、玩家资料、新闻/活动/车队列表、统计、在线历史、版本等全部接口",
-    "hint": "CNTIR 官方限频要求：服务器状态不高于 15 秒一次、实时地图不高于 5 秒一次，插件会自动按这两个下限保护（填 1 也会自动按 15/5 生效）；建议 15-60，设置过大时定位/路况等实时数据会明显滞后"
+  "query_show_avatar": {
+    "type": "bool",
+    "default": true,
+    "description": "查询玩家资料时附带发送头像图片"
   },
   "max_bind_count": {
     "type": "int",
     "default": 3,
     "description": "每个用户最多可绑定的 CNTIR 账号数量（1-10）"
   },
-  "enable_no_prefix": {
-    "type": "bool",
-    "default": true,
-    "description": "允许不输入 cnt 前缀直接使用中文命令（如「查询」「服务器」）",
-    "hint": "若与其他卡车联机插件（如 tmp-bot）同时启用，建议关闭以避免命令冲突"
-  },
-  "query_show_avatar": {
-    "type": "bool",
-    "default": true,
-    "description": "查询玩家资料时附带发送头像图片"
-  },
-  "map_enable": {
-    "type": "bool",
-    "default": true,
-    "description": "定位/路况命令尝试渲染地图图片（失败时自动降级为文字）"
-  },
-  "tile_url_ets": {
-    "type": "string",
-    "default": "",
-    "description": "自定义 ETS2 地图瓦片地址（需含 {z}/{x}/{y} 占位符）",
-    "hint": "留空使用内置瓦片源"
-  },
-  "nearby_radius_m": {
-    "type": "int",
-    "default": 5000,
-    "description": "定位时统计附近玩家的半径（米）"
-  },
   "nearby_max_count": {
     "type": "int",
-    "default": 10,
-    "description": "定位时最多展示的附近玩家数量"
+    "default": 50,
+    "description": "定位时最多展示的附近玩家数量（上限 50）"
   },
   "max_map_points": {
     "type": "int",
-    "default": 400,
-    "description": "路况地图上最多渲染的玩家点数量"
-  },
-  "world_map_zoom": {
-    "type": "int",
-    "default": 2,
-    "description": "路况地图（整张欧洲）的底图精细度，可选 1-4",
-    "hint": "数字越大路网越细，但瓦片数量按 4 的倍数增长（2=16 张、3=64 张、4=256 张），建议 2-3"
+    "default": 1000,
+    "description": "路况地图上最多渲染的玩家点数量（上限 1000）"
   }
 }
