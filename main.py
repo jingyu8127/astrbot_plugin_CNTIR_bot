@@ -159,6 +159,16 @@ def _rel_time(ts: Any, now: Optional[float] = None) -> str:
         return "未知"
 
 
+def _event_is_finished(ev: Dict[str, Any], now: Optional[float] = None) -> bool:
+    """活动是否已结束：有结束时间按结束时间判断；没有结束时间时，开始满 24 小时即视为过期。"""
+    now = now or time.time()
+    end = _fmt_int(ev.get("end_at"))
+    if end > 0:
+        return end <= now
+    start = _fmt_int(ev.get("start_at"))
+    return start > 0 and start + 86400 <= now
+
+
 def _heading_arrow(heading: Any) -> str:
     """朝向弧度 → 箭头+方位（八向）。0 为北、顺时针，若与游戏实际定义有偏差可在此调整。"""
     try:
@@ -628,7 +638,7 @@ class CntirBotPlugin(Star):
             ("📊", "统计", "平台数据统计"),
             ("🚚", "车队 [ID/关键词]", "车队列表/搜索/详情"),
             ("🎉", "活动 [今日/精选/结束/页码]", "活动列表"),
-            ("🎉", "活动详情 [活动ID]", "活动详情（不填看最近一场）"),
+            ("🎉", "活动详情 [序号]", "活动详情（列表第几个，不填看第 1 场）"),
             ("📰", "新闻 [页码]", "新闻列表"),
             ("📰", "新闻详情 [新闻ID]", "新闻正文（不填看最新一篇）"),
             ("🔔", "公告", "全站公告"),
@@ -1056,6 +1066,16 @@ class CntirBotPlugin(Star):
                     logger.warning(f"路况图片发送失败: {e}")
         yield event.plain_result(text)
 
+    async def _event_default_items(self) -> Tuple[List[Dict[str, Any]], str]:
+        """「活动」默认视图的活动列表：优先「即将开始」，为空时退到「24小时内」。"""
+        data = await self.api_events("upcoming", 1)
+        tab = "upcoming"
+        if not data.get("items"):
+            data = await self.api_events("today", 1)
+            tab = "today"
+        items = [it for it in (data.get("items") or []) if isinstance(it, dict)]
+        return items, tab
+
     async def do_events(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
         tab = "upcoming"
@@ -1092,7 +1112,7 @@ class CntirBotPlugin(Star):
             if ev.get("official"):
                 marks += "[官方] "
             kind = KIND_MAP.get(ev.get("kind"), ev.get("kind", ""))
-            head = f"{i}.（活动ID {ev.get('id')}）{marks}{_clean(ev.get('title'))} · {kind}"
+            head = f"{i}. {marks}{_clean(ev.get('title'))} · {kind}"
             body = [
                 f"🕐 开始: {_ts_to_bj(ev.get('start_at'))}"
                 + (f"（集合 {_ts_to_bj(ev.get('meetup_at'))}）" if ev.get("meetup_at") else ""),
@@ -1105,7 +1125,9 @@ class CntirBotPlugin(Star):
             if isinstance(organizer, dict) and organizer.get("name"):
                 body.append(f"👤 组织者: {_clean(organizer.get('name'))}")
             blocks.append(head + "\n" + "\n".join(body))
-        footer = f"\n查看详情：{self._p}活动详情 <活动ID>"
+        footer = ""
+        if not arg:
+            footer = f"\n查看详情：{self._p}活动详情 <序号>（如：{self._p}活动详情 1）"
         if total > page * 18:
             footer += f"\n（第 {page} 页，回复「{self._p}活动 {page + 1}」查看更多）"
         yield event.plain_result("\n\n".join(blocks) + footer)
@@ -1287,38 +1309,49 @@ class CntirBotPlugin(Star):
 
     async def do_event_detail(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
-        if not arg:
-            # 不填 ID 时自动看最近一场活动，省去记 ID
-            try:
-                for tab in ("today", "upcoming"):
-                    items = (await self.api_events(tab, 1)).get("items") or []
-                    if items:
-                        arg = str(items[0].get("id"))
-                        break
-            except CntirApiError as e:
-                yield event.plain_result(f"查询活动详情失败：{e.message}")
-                return
-            if not arg:
-                yield event.plain_result("🎉 最近没有可查看的活动")
-                return
-        if not arg.isdigit():
-            yield event.plain_result(f"用法：{self._p}活动详情 [活动ID]（不填为最近一场）")
+        # 编号含义 = 「活动」默认列表里的第几个（不是平台活动 ID），避免输入 1 就翻出库里第一条历史活动
+        try:
+            items, _tab = await self._event_default_items()
+        except CntirApiError as e:
+            yield event.plain_result(f"查询活动详情失败：{e.message}")
+            return
+        shown = items[:5]
+        if not shown:
+            yield event.plain_result("🎉 当前没有可查看的活动")
+            return
+        if arg and not arg.isdigit():
+            yield event.plain_result(
+                f"用法：{self._p}活动详情 [序号]（1-{len(shown)}，不填看第 1 场）\n"
+                f"序号对应「{self._p}活动」列表里的编号")
+            return
+        idx = int(arg) if arg else 1
+        if idx < 1 or idx > len(shown):
+            yield event.plain_result(
+                f"序号超出范围：当前列表只有 {len(shown)} 场（1-{len(shown)}），"
+                f"可先发送「{self._p}活动」查看列表")
             return
         try:
-            ev = await self.api_event_detail(int(arg))
+            ev = await self.api_event_detail(_fmt_int(shown[idx - 1].get("id")))
         except CntirApiError as e:
             if e.status == 404:
-                yield event.plain_result(f"活动 {arg} 不存在")
+                yield event.plain_result(f"活动 {idx} 已不存在（可能已被删除）")
             else:
                 yield event.plain_result(f"查询活动详情失败：{e.message}")
+            return
+        title = _clean(ev.get("title")) or f"第 {idx} 场活动"
+        when = _ts_to_bj(ev.get("start_at"))
+        # 历史活动（已取消 / 已结束）不再输出任何详情内容
+        if ev.get("cancelled"):
+            yield event.plain_result(f"🚫 「{title}」已取消（原定 {when}），不再提供详情")
+            return
+        if _event_is_finished(ev):
+            yield event.plain_result(f"🚫 「{title}」已结束（开始于 {when}），不再提供详情")
             return
         marks = []
         if ev.get("featured"):
             marks.append("[精选]")
         if ev.get("official"):
             marks.append("[官方]")
-        if ev.get("cancelled"):
-            marks.append("[已取消]")
         kind = KIND_MAP.get(ev.get("kind"), ev.get("kind", ""))
         lines = [f"🎉 {(''.join(marks) + ' ' if marks else '')}{_clean(ev.get('title'))} · {kind}"]
         lines.append(f"🕐 开始: {_ts_to_bj(ev.get('start_at'))}"
@@ -1593,7 +1626,7 @@ class CntirBotPlugin(Star):
 
     @filter.command("cnt活动详情")
     async def cmd_event_detail(self, event: AstrMessageEvent, event_id: str = ""):
-        """查看活动详情（规则/路线/报名），格式：cnt活动详情 <ID>"""
+        """查看活动详情（规则/路线/报名），格式：cnt活动详情 <列表序号>"""
         return
 
     @filter.command("cnt菜单")
