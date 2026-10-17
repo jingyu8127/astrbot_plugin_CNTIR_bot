@@ -114,6 +114,9 @@ KIND_MAP = {"convoy": "巡游", "truckfest": "卡车展", "both": "巡游+卡车
 LEVEL_MAP = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}
 CATEGORY_MAP = {"news": "新闻", "update": "更新", "event": "活动", "notice": "通知", "devblog": "开发日志"}
 VTC_STATUS_MAP = {0: "普通", 1: "认证", 2: "官方认证"}
+SERVER_HISTORY_WORDS = {"历史", "在线历史", "history", "曲线"}
+SERVER_EXPORT_WORDS = {"导出", "图片", "图", "img", "image", "export", "card"}
+
 EVENT_TAB_KEYWORDS = {
     "today": ["today", "今日", "24小时"],
     "upcoming": ["upcoming", "即将", "即将开始"],
@@ -599,6 +602,22 @@ class CntirBotPlugin(Star):
             logger.warning(f"地图渲染失败，降级为文字: {e}")
             return None
 
+    async def _render_text_card(self, title: str, content: str) -> Optional[str]:
+        """把纯文本结果渲染成深蓝底图片，成功返回图片 URL，失败返回 None（调用方降级为文字）。"""
+        try:
+            tmpl_path = os.path.join(self.tpl_dir, "server_card.html")
+            tmpl = await asyncio.to_thread(self._read_file, tmpl_path)
+            if not tmpl:
+                return None
+            data = {"title": title, "content": content, "time": _ts_to_bj(time.time())}
+            url = await self.html_render(tmpl, data, options={
+                "type": "png", "full_page": True, "timeout": 8000, "animations": "disabled",
+            })
+            return url if isinstance(url, str) and url else None
+        except Exception as e:
+            logger.warning(f"深蓝卡片渲染失败，降级为文字: {e}")
+            return None
+
     @staticmethod
     def _read_file(path: str) -> str:
         try:
@@ -633,8 +652,7 @@ class CntirBotPlugin(Star):
             ("👤", "查询 [ID/@人]", "玩家资料（留空查主账号）"),
             ("📍", "定位 [ID/@人]", "实时位置地图"),
             ("🛣", "路况 [服务器]", "在线玩家分布统计"),
-            ("🖥", "服务器", "服务器状态列表"),
-            ("📈", "历史 [服务器] [小时]", "在线历史曲线"),
+            ("🖥", "服务器 [历史/导出]", "服务器状态 · 在线历史 · 导出深蓝图片"),
             ("📊", "统计", "平台数据统计"),
             ("🚚", "车队 [ID/关键词]", "车队列表/搜索/详情"),
             ("🎉", "活动 [今日/精选/结束/页码]", "活动列表"),
@@ -864,15 +882,11 @@ class CntirBotPlugin(Star):
                 logger.warning(f"头像发送失败: {e}")
         yield event.plain_result(text)
 
-    async def do_servers(self, event: AstrMessageEvent, arg: str = ""):
-        try:
-            servers = await self.api_servers()
-        except CntirApiError as e:
-            yield event.plain_result(f"查询失败：{e.message}")
-            return
+    async def _servers_text(self) -> str:
+        """服务器状态列表文本（原「服务器」指令的完整输出）。"""
+        servers = await self.api_servers()
         if not servers:
-            yield event.plain_result("当前没有可用的 CNTIR 服务器")
-            return
+            return "当前没有可用的 CNTIR 服务器"
         blocks = []
         for s in servers:
             online = bool(s.get("online"))
@@ -909,7 +923,97 @@ class CntirBotPlugin(Star):
             if desc:
                 block.append(f"📝 {desc}")
             blocks.append("\n".join(block))
-        yield event.plain_result("🖥 CNTIR 服务器列表\n\n" + "\n\n".join(blocks))
+        return "🖥 CNTIR 服务器列表\n\n" + "\n\n".join(blocks)
+
+    async def _history_text(self, arg: str) -> str:
+        """服务器在线历史文本（原「历史」指令的完整输出）。"""
+        hours = 24
+        code = ""
+        for token in (arg or "").split():
+            if token.isdigit():
+                hours = int(token)
+            else:
+                code = token
+        hours = max(1, min(336, hours))
+        name = ""
+        try:
+            servers = await self.api_servers()
+            default = servers[0] if servers else None
+        except CntirApiError:
+            default = None
+        if default and not code:
+            code = _clean(default.get("code"))
+        if default and code and _clean(default.get("code")).upper() == code.upper():
+            name = _clean(default.get("name"))
+        if not code:
+            return (f"用法：{self._p}服务器 历史 [服务器编号] [小时数]，"
+                    f"例如：{self._p}服务器 历史 C1 24")
+        points = await self.api_server_history(code.upper(), hours)
+        points = [p for p in points if isinstance(p, dict)] if isinstance(points, list) else []
+        if not points:
+            return f"服务器 {code.upper()} 最近 {hours} 小时没有历史采样数据"
+
+        points.sort(key=lambda p: _fmt_int(p.get("t")))
+        total = len(points)
+        online_n = sum(1 for p in points if p.get("online"))
+        rate = online_n / total * 100
+        span = _fmt_int(points[-1].get("t")) - _fmt_int(points[0].get("t"))
+        interval = max(60, span // (total - 1)) if total > 1 else 300
+        # 最长连续在线时段 + 上下线切换次数
+        best = cur = 0
+        switches = 0
+        prev = None
+        for p in points:
+            on = bool(p.get("online"))
+            cur = cur + 1 if on else 0
+            best = max(best, cur)
+            if prev is not None and on != prev:
+                switches += 1
+            prev = on
+        last_on = bool(points[-1].get("online"))
+        title = name or code.upper()
+        return (
+            f"📈 服务器在线历史 — {title}（{code.upper()}）\n"
+            f"⏱ 统计范围: 最近 {hours} 小时（{total} 个采样点，约 {interval // 60} 分钟/点）\n"
+            f"🟢 在线率: {rate:.1f}%（{online_n}/{total}）\n"
+            f"🥇 最长连续在线: 约 {best * interval // 3600} 小时{best * interval % 3600 // 60} 分\n"
+            f"🔁 上下线切换: {switches} 次\n"
+            f"📶 当前状态: {'🟢 在线' if last_on else '⚫ 离线'}"
+        )
+
+    async def do_servers(self, event: AstrMessageEvent, arg: str = ""):
+        """服务器状态列表 / 在线历史（原「历史」指令）/ 导出为深蓝底图片。
+
+        用法：服务器 [历史] [服务器编号] [小时数] [导出]
+        """
+        tokens = [t for t in re.split(r"\s+", (arg or "").strip()) if t]
+        want_img = any(t.lower() in SERVER_EXPORT_WORDS for t in tokens)
+        want_hist = any(t.lower() in SERVER_HISTORY_WORDS for t in tokens)
+        rest_arg = " ".join(
+            t for t in tokens
+            if t.lower() not in SERVER_EXPORT_WORDS and t.lower() not in SERVER_HISTORY_WORDS)
+        if want_hist:
+            try:
+                text = await self._history_text(rest_arg)
+            except CntirApiError as e:
+                yield event.plain_result(f"查询历史失败：{e.message}")
+                return
+        else:
+            try:
+                text = await self._servers_text()
+            except CntirApiError as e:
+                yield event.plain_result(f"查询失败：{e.message}")
+                return
+        if want_img:
+            title = "CNTIR 服务器在线历史" if want_hist else "CNTIR 服务器状态"
+            url = await self._render_text_card(title, text)
+            if url:
+                try:
+                    yield event.chain_result([Image.fromURL(url)])
+                    return
+                except Exception as e:
+                    logger.warning(f"服务器图片发送失败: {e}")
+        yield event.plain_result(text)
 
     async def do_stats(self, event: AstrMessageEvent, arg: str = ""):
         try:
@@ -1406,68 +1510,6 @@ class CntirBotPlugin(Star):
                 lines.append(f"{label}: {v}")
         yield event.plain_result("\n".join(lines))
 
-    async def do_history(self, event: AstrMessageEvent, arg: str = ""):
-        """服务器在线历史：在线率、最长连续在线时长、上下线切换次数等文本统计。"""
-        hours = 24
-        code = ""
-        for token in (arg or "").split():
-            if token.isdigit():
-                hours = int(token)
-            else:
-                code = token
-        hours = max(1, min(336, hours))
-        name = ""
-        try:
-            servers = await self.api_servers()
-            default = servers[0] if servers else None
-        except CntirApiError:
-            default = None
-        if default and not code:
-            code = _clean(default.get("code"))
-        if default and code and _clean(default.get("code")).upper() == code.upper():
-            name = _clean(default.get("name"))
-        if not code:
-            yield event.plain_result("用法：cnt历史 [服务器编号] [小时数]，例如：cnt历史 C1 24")
-            return
-        try:
-            points = await self.api_server_history(code.upper(), hours)
-        except CntirApiError as e:
-            yield event.plain_result(f"查询历史失败：{e.message}")
-            return
-        points = [p for p in points if isinstance(p, dict)] if isinstance(points, list) else []
-        if not points:
-            yield event.plain_result(f"服务器 {code.upper()} 最近 {hours} 小时没有历史采样数据")
-            return
-
-        points.sort(key=lambda p: _fmt_int(p.get("t")))
-        total = len(points)
-        online_n = sum(1 for p in points if p.get("online"))
-        rate = online_n / total * 100
-        span = _fmt_int(points[-1].get("t")) - _fmt_int(points[0].get("t"))
-        interval = max(60, span // (total - 1)) if total > 1 else 300
-        # 最长连续在线时段 + 上下线切换次数
-        best = cur = 0
-        switches = 0
-        prev = None
-        for p in points:
-            on = bool(p.get("online"))
-            cur = cur + 1 if on else 0
-            best = max(best, cur)
-            if prev is not None and on != prev:
-                switches += 1
-            prev = on
-        last_on = bool(points[-1].get("online"))
-        title = name or code.upper()
-        text = (
-            f"📈 服务器在线历史 — {title}（{code.upper()}）\n"
-            f"⏱ 统计范围: 最近 {hours} 小时（{total} 个采样点，约 {interval // 60} 分钟/点）\n"
-            f"🟢 在线率: {rate:.1f}%（{online_n}/{total}）\n"
-            f"🥇 最长连续在线: 约 {best * interval // 3600} 小时{best * interval % 3600 // 60} 分\n"
-            f"🔁 上下线切换: {switches} 次\n"
-            f"📶 当前状态: {'🟢 在线' if last_on else '⚫ 离线'}"
-        )
-        yield event.plain_result(text)
-
     async def do_version(self, event: AstrMessageEvent, arg: str = ""):
         try:
             v = await self.api_version()
@@ -1508,9 +1550,9 @@ class CntirBotPlugin(Star):
             (rx(r"查询|查", r"\s*(\S*)"), "do_query"),
             (rx(r"定位", r"\s*(\S*)"), "do_locate"),
             (rx(r"路况", r"\s*(\S*)"), "do_traffic"),
-            (rx(r"服务器"), "do_servers"),
+            # 「历史」已并入「服务器」：服务器 [历史] [编号] [小时数] [导出]
+            (rx(r"服务器", r"\s*(.*)"), "do_servers"),
             (rx(r"统计"), "do_stats"),
-            (rx(r"历史|在线历史", r"\s*(.*)"), "do_history"),
             (rx(r"车队", r"\s*(.*)"), "do_vtc"),
             # 详情命令必须排在列表命令之前，避免被「新闻/活动」的页码参数抢匹配
             (rx(r"新闻详情|新闻内容", r"\s*(\S*)"), "do_news_detail"),
@@ -1580,8 +1622,8 @@ class CntirBotPlugin(Star):
         return
 
     @filter.command("cnt服务器")
-    async def cmd_servers(self, event: AstrMessageEvent):
-        """查看 CNTIR 服务器实时状态列表"""
+    async def cmd_servers(self, event: AstrMessageEvent, args: str = ""):
+        """查看服务器状态 / 在线历史 / 导出图片，格式：cnt服务器 [历史] [编号] [小时数] [导出]"""
         return
 
     @filter.command("cnt统计")
@@ -1612,11 +1654,6 @@ class CntirBotPlugin(Star):
     @filter.command("cnt版本")
     async def cmd_version(self, event: AstrMessageEvent):
         """查询 CNTIR 插件与启动器版本"""
-        return
-
-    @filter.command("cnt历史")
-    async def cmd_history(self, event: AstrMessageEvent, args: str = ""):
-        """服务器在线历史曲线，格式：cnt历史 [服务器编号] [小时数]"""
         return
 
     @filter.command("cnt新闻详情")
