@@ -1,58 +1,45 @@
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
 <style>
-  html, body { margin: 0; padding: 0; width: 1000px; height: 800px; background: #1f2328; overflow: hidden; }
-  #map { width: 1000px; height: 800px; background: #2a2f36; }
-  .leaflet-container { background: #2a2f36; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: {{ width }}px;
+    height: {{ height }}px;
+    background: #1c2026;
+    overflow: hidden;
+  }
+  #map {
+    position: relative;
+    width: {{ width }}px;
+    height: {{ height }}px;
+    overflow: hidden;
+    background: #1c2026;
+  }
+  /* 瓦片已由插件端下载并内联为 data URI，页面不再发网络请求，截图必定完整 */
+  .tile {
+    position: absolute;
+    width: 512px;
+    height: 512px;
+    display: block;
+  }
+  .dot {
+    position: absolute;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+  }
+  .dot.me {
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.65), 0 0 10px rgba(87, 189, 0, 0.9);
+  }
+  .attr {
+    position: absolute;
+    right: 10px;
+    bottom: 8px;
+    font: 13px/1 "Microsoft YaHei", "PingFang SC", sans-serif;
+    color: rgba(255, 255, 255, 0.35);
+  }
 </style>
-<div id="map"></div>
-<script>
-  // ---- 数据由后端 Jinja2 注入 ----
-  var tileUrl = '{{ tile_url }}';
-  var fallbackUrl = '{{ fallback_url }}';
-  var centerX = {{ center_x }};
-  var centerZ = {{ center_z }};
-  var zoomLevel = {{ zoom }};
-  var players = [
-    {% for p in players %}{ axisX: {{ p.axisX }}, axisZ: {{ p.axisZ }}, me: {{ 1 if p.me else 0 }} }{{ "," if not loop.last }}{% endfor %}
-  ];
-
-  // ---- CNTIR 世界坐标（米）→ ETS2 瓦片像素（同 Trucky/tmp-bot 换算）----
-  var SCALE = 1.609055;
-  var OFF_X = 70272, OFF_Z = 76157;
-  function toTile(x, z) {
-    return [x / SCALE + OFF_X, z / SCALE + OFF_Z];
-  }
-
-  var map = L.map('map', {
-    attributionControl: false, crs: L.CRS.Simple,
-    zoomControl: false, zoomSnap: 0.2, zoomDelta: 0.2
-  });
-  var bounds = L.latLngBounds(
-    map.unproject([0, 131072], 8),
-    map.unproject([131072, 0], 8)
-  );
-  var tileOpts = { minZoom: 2, maxZoom: 10, maxNativeZoom: 8, tileSize: 512, bounds: bounds, reuseTiles: true };
-  var tileLayer = L.tileLayer(tileUrl, tileOpts).addTo(map);
-  var switched = false;
-  tileLayer.on('tileerror', function () {
-    if (switched || !fallbackUrl) return;
-    switched = true;
-    map.removeLayer(tileLayer);
-    tileLayer = L.tileLayer(fallbackUrl, tileOpts).addTo(map);
-  });
-  map.setMaxBounds(bounds);
-
-  for (var i = 0; i < players.length; i++) {
-    var p = players[i];
-    var ll = map.unproject(toTile(p.axisX, p.axisZ), 8);
-    L.circleMarker(ll, {
-      color: '#2f2f2f', weight: 2,
-      fillColor: p.me ? '#57bd00' : '#3ca7ff',
-      fillOpacity: 1,
-      radius: p.me ? 7 : 4
-    }).addTo(map);
-  }
-
-  map.setView(map.unproject(toTile(centerX, centerZ), 8), zoomLevel);
-</script>
+<div id="map">
+  {% for t in tiles %}<img class="tile" src="{{ t.src }}" style="left: {{ t.left }}px; top: {{ t.top }}px" alt="">{% endfor %}
+  {% for m in markers %}<span class="dot{{ ' me' if m.me else '' }}" style="left: {{ m.x }}px; top: {{ m.y }}px; width: {{ m.size }}px; height: {{ m.size }}px; background: {{ m.color }}"></span>{% endfor %}
+  <div class="attr">CNTIR 实时地图</div>
+</div>
