@@ -114,6 +114,9 @@ KIND_MAP = {"convoy": "巡游", "truckfest": "卡车展", "both": "巡游+卡车
 LEVEL_MAP = {"info": "ℹ️", "warning": "⚠️", "critical": "🚨"}
 CATEGORY_MAP = {"news": "新闻", "update": "更新", "event": "活动", "notice": "通知", "devblog": "开发日志"}
 VTC_STATUS_MAP = {0: "普通", 1: "认证", 2: "官方认证"}
+SERVER_HISTORY_WORDS = {"历史", "在线历史", "history", "曲线"}
+SERVER_EXPORT_WORDS = {"导出", "图片", "图", "img", "image", "export", "card"}
+
 EVENT_TAB_KEYWORDS = {
     "today": ["today", "今日", "24小时"],
     "upcoming": ["upcoming", "即将", "即将开始"],
@@ -599,6 +602,23 @@ class CntirBotPlugin(Star):
             logger.warning(f"地图渲染失败，降级为文字: {e}")
             return None
 
+    async def _render_server_image(self, data: Dict[str, Any]) -> Optional[str]:
+        """渲染服务器卡片图（深蓝底 + 分服卡片 + 24h 曲线），失败返回 None（调用方降级文字）。"""
+        try:
+            tmpl_path = os.path.join(self.tpl_dir, "server_card.html")
+            tmpl = await asyncio.to_thread(self._read_file, tmpl_path)
+            if not tmpl:
+                return None
+            payload = dict(data)
+            payload["time"] = _ts_to_bj(time.time())
+            url = await self.html_render(tmpl, payload, options={
+                "type": "png", "full_page": True, "timeout": 10000, "animations": "disabled",
+            })
+            return url if isinstance(url, str) and url else None
+        except Exception as e:
+            logger.warning(f"服务器卡片渲染失败，降级为文字: {e}")
+            return None
+
     @staticmethod
     def _read_file(path: str) -> str:
         try:
@@ -633,8 +653,7 @@ class CntirBotPlugin(Star):
             ("👤", "查询 [ID/@人]", "玩家资料（留空查主账号）"),
             ("📍", "定位 [ID/@人]", "实时位置地图"),
             ("🛣", "路况 [服务器]", "在线玩家分布统计"),
-            ("🖥", "服务器", "服务器状态列表"),
-            ("📈", "历史 [服务器] [小时]", "在线历史曲线"),
+            ("🖥", "服务器 [历史/导出]", "服务器状态"),
             ("📊", "统计", "平台数据统计"),
             ("🚚", "车队 [ID/关键词]", "车队列表/搜索/详情"),
             ("🎉", "活动 [今日/精选/结束/页码]", "活动列表"),
@@ -864,15 +883,11 @@ class CntirBotPlugin(Star):
                 logger.warning(f"头像发送失败: {e}")
         yield event.plain_result(text)
 
-    async def do_servers(self, event: AstrMessageEvent, arg: str = ""):
-        try:
-            servers = await self.api_servers()
-        except CntirApiError as e:
-            yield event.plain_result(f"查询失败：{e.message}")
-            return
+    async def _servers_text(self) -> str:
+        """服务器状态列表文本（原「服务器」指令的完整输出）。"""
+        servers = await self.api_servers()
         if not servers:
-            yield event.plain_result("当前没有可用的 CNTIR 服务器")
-            return
+            return "当前没有可用的 CNTIR 服务器"
         blocks = []
         for s in servers:
             online = bool(s.get("online"))
@@ -909,7 +924,276 @@ class CntirBotPlugin(Star):
             if desc:
                 block.append(f"📝 {desc}")
             blocks.append("\n".join(block))
-        yield event.plain_result("🖥 CNTIR 服务器列表\n\n" + "\n\n".join(blocks))
+        return "🖥 CNTIR 服务器列表\n\n" + "\n\n".join(blocks)
+
+    async def _history_series(self, arg: str) -> Tuple[str, int, str, List[Dict[str, Any]]]:
+        """解析「服务器 历史 [编号] [小时数]」参数并取采样点，返回 (code, hours, name, points)。"""
+        hours = 24
+        code = ""
+        for token in (arg or "").split():
+            if token.isdigit():
+                hours = int(token)
+            else:
+                code = token
+        hours = max(1, min(336, hours))
+        name = ""
+        try:
+            servers = await self.api_servers()
+            default = servers[0] if servers else None
+        except CntirApiError:
+            default = None
+        if default and not code:
+            code = _clean(default.get("code"))
+        if default and code and _clean(default.get("code")).upper() == code.upper():
+            name = _clean(default.get("name"))
+        if not code:
+            return "", hours, "", []
+        points = await self.api_server_history(code.upper(), hours)
+        points = [p for p in points if isinstance(p, dict)] if isinstance(points, list) else []
+        points.sort(key=lambda p: _fmt_int(p.get("t")))
+        return code.upper(), hours, name, points
+
+    @staticmethod
+    def _history_stats(points: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """历史采样点 → 在线率 / 最长连续在线 / 上下线切换 / 当前状态。"""
+        total = len(points)
+        if not total:
+            return {}
+        online_n = sum(1 for p in points if p.get("online"))
+        span = _fmt_int(points[-1].get("t")) - _fmt_int(points[0].get("t"))
+        interval = max(60, span // (total - 1)) if total > 1 else 300
+        # 最长连续在线时段 + 上下线切换次数
+        best = cur = 0
+        switches = 0
+        prev = None
+        for p in points:
+            on = bool(p.get("online"))
+            cur = cur + 1 if on else 0
+            best = max(best, cur)
+            if prev is not None and on != prev:
+                switches += 1
+            prev = on
+        return {
+            "total": total,
+            "online_n": online_n,
+            "rate": online_n / total * 100,
+            "interval": interval,
+            "best": best,
+            "switches": switches,
+            "last_on": bool(points[-1].get("online")),
+            "last_value": _fmt_int(points[-1].get("online")),
+        }
+
+    async def _history_text(self, arg: str) -> str:
+        """服务器在线历史文本（原「历史」指令的完整输出）。"""
+        code, hours, name, points = await self._history_series(arg)
+        if not code:
+            return (f"用法：{self._p}服务器 历史 [服务器编号] [小时数]，"
+                    f"例如：{self._p}服务器 历史 C1 24")
+        if not points:
+            return f"服务器 {code} 最近 {hours} 小时没有历史采样数据"
+        st = self._history_stats(points)
+        title = name or code
+        return (
+            f"📈 服务器在线历史 — {title}（{code}）\n"
+            f"⏱ 统计范围: 最近 {hours} 小时（{st['total']} 个采样点，约 {st['interval'] // 60} 分钟/点）\n"
+            f"🟢 在线率: {st['rate']:.1f}%（{st['online_n']}/{st['total']}）\n"
+            f"🥇 最长连续在线: 约 {st['best'] * st['interval'] // 3600} 小时"
+            f"{st['best'] * st['interval'] % 3600 // 60} 分\n"
+            f"🔁 上下线切换: {st['switches']} 次\n"
+            f"📶 当前状态: {'🟢 在线' if st['last_on'] else '⚫ 离线'}"
+        )
+
+    @staticmethod
+    def _server_tags(s: Dict[str, Any]) -> List[str]:
+        """服务器特性 → 图片卡片上的小标签。"""
+        tags = []
+        if s.get("collisions"):
+            tags.append("💥 碰撞")
+        sl = _fmt_int(s.get("speed_limit"))
+        slc = _fmt_int(s.get("speed_limit_city"))
+        if sl or slc:
+            tags.append(f"🚦 限速{sl or '∞'}/{slc or '∞'}")
+        if s.get("afk_kick"):
+            tags.append("⏱ 挂机踢")
+        if s.get("cars_for_players"):
+            tags.append("🚗 轿车")
+        if s.get("police_for_players"):
+            tags.append("🚓 警车")
+        if s.get("event"):
+            tags.append("🎪 活动服")
+        if s.get("promods"):
+            tags.append("🗺 ProMods")
+        return tags
+
+    @staticmethod
+    def _spark(values: List[Any], height: float = 18.0) -> Optional[Dict[str, Any]]:
+        """流量波形（卡片顶部的细线迷你图）：最近短窗口的人数序列。"""
+        vals = [max(0, _fmt_int(v)) for v in values]
+        if len(vals) < 2:
+            return None
+        w, h = 960.0, height
+        ymax = max(1, max(vals))
+        n = len(vals)
+        pts = []
+        for i, v in enumerate(vals):
+            x = i * w / (n - 1)
+            y = h - 2 - (v / ymax) * (h - 4)
+            pts.append((x, y))
+        line = "M " + " L ".join(f"{x:.1f} {y:.1f}" for x, y in pts)
+        return {"line": line, "w": int(w), "h": int(h)}
+
+    @staticmethod
+    def _chart(values: List[Any]) -> Optional[Dict[str, Any]]:
+        """人数序列 → SVG 折线/面积路径（960×110 视口）。"""
+        vals = [max(0, _fmt_int(v)) for v in values]
+        if len(vals) < 2:
+            return None
+        w, h = 960.0, 110.0
+        ymax = max(1, max(vals))
+        n = len(vals)
+        pts = []
+        for i, v in enumerate(vals):
+            x = i * w / (n - 1)
+            y = h - 6 - (v / ymax) * (h - 24)
+            pts.append((x, y))
+        line = "M " + " L ".join(f"{x:.1f} {y:.1f}" for x, y in pts)
+        area = f"{line} L {w:.0f} {h:.0f} L 0 {h:.0f} Z"
+        return {"line": line, "area": area, "w": int(w), "h": int(h), "max": ymax}
+
+    async def _build_server_cards(self, want_hist: bool, arg: str) -> Optional[Dict[str, Any]]:
+        """构建导出图片的数据：历史模式单卡片，列表模式每个服务器一张卡片。"""
+        if want_hist:
+            code, hours, name, points = await self._history_series(arg)
+            if not code or not points:
+                return None
+            st = self._history_stats(points)
+            try:
+                servers = await self.api_servers()
+            except CntirApiError:
+                servers = []
+            server = next((s for s in servers if _clean(s.get("code")).upper() == code), None)
+            players = st["last_value"]
+            max_players = _fmt_int(server.get("max_players")) if server else 0
+            recent: List[Dict[str, Any]] = []
+            try:
+                recent = await self.api_server_history(code, 1)
+            except CntirApiError:
+                recent = []
+            recent = [p for p in recent if isinstance(p, dict)] if isinstance(recent, list) else []
+            recent.sort(key=lambda p: _fmt_int(p.get("t")))
+            card = {
+                "name": name or code,
+                "code": code,
+                "online": st["last_on"],
+                "players": players,
+                "max_players": max_players,
+                "pct": round(players / max_players * 100, 1) if max_players else 0,
+                "tags": self._server_tags(server) if server else [],
+                "mini": self._spark([p.get("online") for p in recent]),
+                "chart": self._chart([p.get("online") for p in points]),
+                "stats": [
+                    {"label": "在线率", "value": f"{st['rate']:.1f}%"},
+                    {"label": f"最近 {hours} 小时", "value": f"{st['total']} 个采样点"},
+                    {"label": "最长连续在线",
+                     "value": f"{st['best'] * st['interval'] // 3600} 小时"
+                              f"{st['best'] * st['interval'] % 3600 // 60} 分"},
+                    {"label": "上下线切换", "value": f"{st['switches']} 次"},
+                ],
+            }
+            return {
+                "title": "CNTIR 服务器在线历史",
+                "subtitle": f"{code} · 最近 {hours} 小时在线曲线",
+                "total": players,
+                "total_label": "当前在线",
+                "cards": [card],
+            }
+
+        servers = await self.api_servers()
+        if not servers:
+            return None
+        cards = []
+        total = 0
+        for s in servers:
+            code = _clean(s.get("code"))
+            players = _fmt_int(s.get("players"))
+            max_players = _fmt_int(s.get("max_players"))
+            total += players
+            chart = None
+            mini = None
+            if code:
+                try:
+                    pts = await self.api_server_history(code, 24)
+                except CntirApiError:
+                    pts = []
+                pts = [p for p in pts if isinstance(p, dict)] if isinstance(pts, list) else []
+                pts.sort(key=lambda p: _fmt_int(p.get("t")))
+                chart = self._chart([p.get("online") for p in pts])
+                try:
+                    rec = await self.api_server_history(code, 1)
+                except CntirApiError:
+                    rec = []
+                rec = [p for p in rec if isinstance(p, dict)] if isinstance(rec, list) else []
+                rec.sort(key=lambda p: _fmt_int(p.get("t")))
+                mini = self._spark([p.get("online") for p in rec])
+            cards.append({
+                "name": _clean(s.get("name")) or code or "未知服务器",
+                "code": code,
+                "online": bool(s.get("online")),
+                "players": players,
+                "max_players": max_players,
+                "pct": round(players / max_players * 100, 1) if max_players else 0,
+                "tags": self._server_tags(s),
+                "mini": mini,
+                "chart": chart,
+                "stats": [],
+            })
+        return {
+            "title": "CNTIR 服务器状态",
+            "subtitle": "实时人数 · 24 小时在线曲线",
+            "total": total,
+            "total_label": "在线",
+            "cards": cards,
+        }
+
+    async def do_servers(self, event: AstrMessageEvent, arg: str = ""):
+        """服务器状态列表 / 在线历史（原「历史」指令）/ 导出为深蓝底图片。
+
+        用法：服务器 [历史] [服务器编号] [小时数] [导出]
+        """
+        tokens = [t for t in re.split(r"\s+", (arg or "").strip()) if t]
+        want_img = any(t.lower() in SERVER_EXPORT_WORDS for t in tokens)
+        want_hist = any(t.lower() in SERVER_HISTORY_WORDS for t in tokens)
+        rest_arg = " ".join(
+            t for t in tokens
+            if t.lower() not in SERVER_EXPORT_WORDS and t.lower() not in SERVER_HISTORY_WORDS)
+        if want_hist:
+            try:
+                text = await self._history_text(rest_arg)
+            except CntirApiError as e:
+                yield event.plain_result(f"查询历史失败：{e.message}")
+                return
+        else:
+            try:
+                text = await self._servers_text()
+            except CntirApiError as e:
+                yield event.plain_result(f"查询失败：{e.message}")
+                return
+        if want_img:
+            try:
+                data = await self._build_server_cards(want_hist, rest_arg)
+            except CntirApiError as e:
+                logger.warning(f"导出图片取数失败，改为文字输出: {e}")
+                data = None
+            if data:
+                url = await self._render_server_image(data)
+                if url:
+                    try:
+                        yield event.chain_result([Image.fromURL(url)])
+                        return
+                    except Exception as e:
+                        logger.warning(f"服务器图片发送失败: {e}")
+        yield event.plain_result(text)
 
     async def do_stats(self, event: AstrMessageEvent, arg: str = ""):
         try:
@@ -1406,68 +1690,6 @@ class CntirBotPlugin(Star):
                 lines.append(f"{label}: {v}")
         yield event.plain_result("\n".join(lines))
 
-    async def do_history(self, event: AstrMessageEvent, arg: str = ""):
-        """服务器在线历史：在线率、最长连续在线时长、上下线切换次数等文本统计。"""
-        hours = 24
-        code = ""
-        for token in (arg or "").split():
-            if token.isdigit():
-                hours = int(token)
-            else:
-                code = token
-        hours = max(1, min(336, hours))
-        name = ""
-        try:
-            servers = await self.api_servers()
-            default = servers[0] if servers else None
-        except CntirApiError:
-            default = None
-        if default and not code:
-            code = _clean(default.get("code"))
-        if default and code and _clean(default.get("code")).upper() == code.upper():
-            name = _clean(default.get("name"))
-        if not code:
-            yield event.plain_result("用法：cnt历史 [服务器编号] [小时数]，例如：cnt历史 C1 24")
-            return
-        try:
-            points = await self.api_server_history(code.upper(), hours)
-        except CntirApiError as e:
-            yield event.plain_result(f"查询历史失败：{e.message}")
-            return
-        points = [p for p in points if isinstance(p, dict)] if isinstance(points, list) else []
-        if not points:
-            yield event.plain_result(f"服务器 {code.upper()} 最近 {hours} 小时没有历史采样数据")
-            return
-
-        points.sort(key=lambda p: _fmt_int(p.get("t")))
-        total = len(points)
-        online_n = sum(1 for p in points if p.get("online"))
-        rate = online_n / total * 100
-        span = _fmt_int(points[-1].get("t")) - _fmt_int(points[0].get("t"))
-        interval = max(60, span // (total - 1)) if total > 1 else 300
-        # 最长连续在线时段 + 上下线切换次数
-        best = cur = 0
-        switches = 0
-        prev = None
-        for p in points:
-            on = bool(p.get("online"))
-            cur = cur + 1 if on else 0
-            best = max(best, cur)
-            if prev is not None and on != prev:
-                switches += 1
-            prev = on
-        last_on = bool(points[-1].get("online"))
-        title = name or code.upper()
-        text = (
-            f"📈 服务器在线历史 — {title}（{code.upper()}）\n"
-            f"⏱ 统计范围: 最近 {hours} 小时（{total} 个采样点，约 {interval // 60} 分钟/点）\n"
-            f"🟢 在线率: {rate:.1f}%（{online_n}/{total}）\n"
-            f"🥇 最长连续在线: 约 {best * interval // 3600} 小时{best * interval % 3600 // 60} 分\n"
-            f"🔁 上下线切换: {switches} 次\n"
-            f"📶 当前状态: {'🟢 在线' if last_on else '⚫ 离线'}"
-        )
-        yield event.plain_result(text)
-
     async def do_version(self, event: AstrMessageEvent, arg: str = ""):
         try:
             v = await self.api_version()
@@ -1508,9 +1730,9 @@ class CntirBotPlugin(Star):
             (rx(r"查询|查", r"\s*(\S*)"), "do_query"),
             (rx(r"定位", r"\s*(\S*)"), "do_locate"),
             (rx(r"路况", r"\s*(\S*)"), "do_traffic"),
-            (rx(r"服务器"), "do_servers"),
+            # 「历史」已并入「服务器」：服务器 [历史] [编号] [小时数] [导出]
+            (rx(r"服务器", r"\s*(.*)"), "do_servers"),
             (rx(r"统计"), "do_stats"),
-            (rx(r"历史|在线历史", r"\s*(.*)"), "do_history"),
             (rx(r"车队", r"\s*(.*)"), "do_vtc"),
             # 详情命令必须排在列表命令之前，避免被「新闻/活动」的页码参数抢匹配
             (rx(r"新闻详情|新闻内容", r"\s*(\S*)"), "do_news_detail"),
@@ -1580,8 +1802,8 @@ class CntirBotPlugin(Star):
         return
 
     @filter.command("cnt服务器")
-    async def cmd_servers(self, event: AstrMessageEvent):
-        """查看 CNTIR 服务器实时状态列表"""
+    async def cmd_servers(self, event: AstrMessageEvent, args: str = ""):
+        """查看服务器状态 / 在线历史 / 导出图片，格式：cnt服务器 [历史] [编号] [小时数] [导出]"""
         return
 
     @filter.command("cnt统计")
@@ -1612,11 +1834,6 @@ class CntirBotPlugin(Star):
     @filter.command("cnt版本")
     async def cmd_version(self, event: AstrMessageEvent):
         """查询 CNTIR 插件与启动器版本"""
-        return
-
-    @filter.command("cnt历史")
-    async def cmd_history(self, event: AstrMessageEvent, args: str = ""):
-        """服务器在线历史曲线，格式：cnt历史 [服务器编号] [小时数]"""
         return
 
     @filter.command("cnt新闻详情")

@@ -1,0 +1,124 @@
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #061224;
+  }
+  body {
+    width: 1000px;
+    font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC",
+                 "Segoe UI", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    box-sizing: border-box;
+    width: 1000px;
+    padding: 32px 28px 22px;
+    background: linear-gradient(180deg, #07203d 0%, #061224 55%, #04101f 100%);
+  }
+  .head { display: flex; align-items: flex-end; padding: 0 4px 20px; }
+  .head .brand { display: flex; align-items: center; gap: 14px; }
+  .logo {
+    width: 46px; height: 46px; border-radius: 12px; flex: none;
+    background: linear-gradient(140deg, #1d4ed8 0%, #0ea5e9 100%);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 24px; color: #ffffff;
+  }
+  .head .t { font-size: 34px; font-weight: 700; color: #ffffff; letter-spacing: 1px; }
+  .head .s { font-size: 17px; color: #7a9dc4; margin: 4px 0 0; }
+  .head .total { margin-left: auto; text-align: right; line-height: 1; }
+  .head .total b { font-size: 46px; font-weight: 700; color: #4db8ff; letter-spacing: 1px; }
+  .head .total span { display: block; font-size: 15px; color: #6f8bab; margin-top: 8px; letter-spacing: 2px; }
+
+  .card {
+    background: #0b1f38;
+    border: 1px solid rgba(77, 148, 255, 0.22);
+    border-radius: 14px;
+    padding: 18px 20px 0;
+    margin-bottom: 14px;
+    overflow: hidden;
+  }
+  .row { display: flex; align-items: center; }
+  .dot { width: 12px; height: 12px; border-radius: 50%; margin-right: 10px; flex: none; background: #22c55e; box-shadow: 0 0 10px rgba(34, 197, 94, 0.8); }
+  .dot.off { background: #64748b; box-shadow: none; }
+  .name { font-size: 25px; font-weight: 700; color: #ffffff; }
+  .code { margin-left: 10px; font-size: 15px; color: #64809f; }
+  .num { margin-left: auto; white-space: nowrap; }
+  .num b { font-size: 34px; font-weight: 700; color: #4db8ff; }
+  .num span { font-size: 17px; color: #6f8bab; }
+
+  .mini { margin: 12px 0 0; }
+  .mini svg { display: block; width: 100%; height: 18px; }
+
+  .tags { display: flex; flex-wrap: wrap; gap: 8px; padding-bottom: 4px; }
+  .tag { font-size: 15px; color: #a9c1dc; background: rgba(120, 175, 255, 0.10); border: 1px solid rgba(120, 175, 255, 0.14); border-radius: 6px; padding: 3px 9px; }
+
+  .chart { margin: 10px 0 14px; }
+  .chart svg { display: block; width: 100%; height: 110px; }
+  .chart.none { height: 6px; }
+
+  .stats { display: flex; gap: 10px; margin: 14px 0 16px; }
+  .stat { flex: 1; padding: 10px 12px; border-radius: 10px; background: rgba(77, 148, 255, 0.10); }
+  .stat em { display: block; font-style: normal; font-size: 13px; color: #7a9dc4; margin-bottom: 4px; }
+  .stat b { font-size: 21px; font-weight: 700; color: #eaf2ff; }
+
+  .foot { padding-top: 4px; text-align: center; font-size: 13px; color: #3f5b7d; letter-spacing: 5px; }
+</style>
+<div class="wrap">
+  <div class="head">
+    <div class="brand">
+      <div class="logo">🖥</div>
+      <div>
+        <div class="t">{{ title }}</div>
+        <div class="s">{{ subtitle }} · {{ time }}</div>
+      </div>
+    </div>
+    <div class="total">
+      <b>{{ total }}</b>
+      <span>{{ total_label }}</span>
+    </div>
+  </div>
+  {% for c in cards %}
+  <div class="card">
+    <div class="row">
+      <span class="dot{{ '' if c.online else ' off' }}"></span>
+      <span class="name">{{ c.name }}</span>
+      {% if c.code %}<span class="code">{{ c.code }}</span>{% endif %}
+      <span class="num"><b>{{ c.players }}</b><span> / {{ c.max_players or '—' }}</span></span>
+    </div>
+    {% if c.tags %}
+    <div class="tags">{% for t in c.tags %}<span class="tag">{{ t }}</span>{% endfor %}</div>
+    {% endif %}
+    {% if c.mini %}
+    <div class="mini">
+      <svg viewBox="0 0 {{ c.mini.w }} {{ c.mini.h }}" preserveAspectRatio="none">
+        <path d="{{ c.mini.line }}" fill="none"
+              stroke="{{ '#22c55e' if c.online else '#64748b' }}"
+              stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>
+    </div>
+    {% endif %}
+    {% if c.chart %}
+    <div class="chart">
+      <svg viewBox="0 0 {{ c.chart.w }} {{ c.chart.h }}" preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="grad{{ loop.index }}" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.45"/>
+            <stop offset="100%" stop-color="#38bdf8" stop-opacity="0.02"/>
+          </linearGradient>
+        </defs>
+        <path d="{{ c.chart.area }}" fill="url(#grad{{ loop.index }})"/>
+        <path d="{{ c.chart.line }}" fill="none" stroke="#38d6f8" stroke-width="2.2"
+              stroke-linejoin="round" stroke-linecap="round"/>
+      </svg>
+    </div>
+    {% else %}
+    <div class="chart none"></div>
+    {% endif %}
+    {% if c.stats %}
+    <div class="stats">{% for st in c.stats %}<div class="stat"><em>{{ st.label }}</em><b>{{ st.value }}</b></div>{% endfor %}</div>
+    {% endif %}
+  </div>
+  {% endfor %}
+  <div class="foot">CNTIR 实时服务器监控</div>
+</div>
