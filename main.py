@@ -116,6 +116,7 @@ CATEGORY_MAP = {"news": "新闻", "update": "更新", "event": "活动", "notice
 VTC_STATUS_MAP = {0: "普通", 1: "认证", 2: "官方认证"}
 SERVER_HISTORY_WORDS = {"历史", "在线历史", "history", "曲线"}
 SERVER_EXPORT_WORDS = {"导出", "图片", "图", "img", "image", "export", "card"}
+SERVER_TEXT_WORDS = {"文字", "文本", "纯文本", "text", "plain"}
 
 EVENT_TAB_KEYWORDS = {
     "today": ["today", "今日", "24小时"],
@@ -653,8 +654,7 @@ class CntirBotPlugin(Star):
             ("👤", "查询 [ID/@人]", "玩家资料（留空查主账号）"),
             ("📍", "定位 [ID/@人]", "实时位置地图"),
             ("🛣", "路况 [服务器]", "在线玩家分布统计"),
-            ("🖥", "服务器 [历史/导出]", "服务器状态"),
-            ("📊", "统计", "平台数据统计"),
+            ("🖥", "服务器 [历史/文字]", "服务器状态 + 平台统计（图片）· 在线历史"),
             ("🚚", "车队 [ID/关键词]", "车队列表/搜索/详情"),
             ("🎉", "活动 [今日/精选/结束/页码]", "活动列表"),
             ("🎉", "活动详情 [序号]", "活动详情（列表第几个，不填看第 1 场）"),
@@ -924,7 +924,42 @@ class CntirBotPlugin(Star):
             if desc:
                 block.append(f"📝 {desc}")
             blocks.append("\n".join(block))
-        return "🖥 CNTIR 服务器列表\n\n" + "\n\n".join(blocks)
+        text = "🖥 CNTIR 服务器列表\n\n" + "\n\n".join(blocks)
+        stats = await self._stats_text()
+        if stats:
+            text += "\n\n" + stats
+        return text
+
+    async def _stats_text(self) -> str:
+        """平台统计文本（原「统计」指令的完整输出），失败返回空串（不影响服务器信息）。"""
+        try:
+            st = await self.api_stats()
+        except CntirApiError:
+            return ""
+        return (
+            "📊 CNTIR 平台统计\n"
+            f"👥 当前在线: {st.get('players_online', 0)}（24h 峰值 {st.get('peak_today', 0)}）\n"
+            f"🖥 服务器: {st.get('servers_online', 0)}/{st.get('servers', 0)} 在线\n"
+            f"👤 注册用户: {st.get('users', 0)} · 车队 {st.get('vtcs', 0)}\n"
+            f"📦 累计运单: {st.get('deliveries', 0)} · 累计里程 {st.get('distance_km', 0)} km\n"
+            f"🎉 即将开始的活动: {st.get('events_upcoming', 0)}"
+        )
+
+    async def _stats_summary(self) -> List[Dict[str, str]]:
+        """平台统计 → 图片顶部的摘要条目，失败返回空列表。"""
+        try:
+            st = await self.api_stats()
+        except CntirApiError:
+            return []
+        return [
+            {"label": "当前在线", "value": f"{_fmt_int(st.get('players_online'))}"},
+            {"label": "24h 峰值", "value": f"{_fmt_int(st.get('peak_today'))}"},
+            {"label": "服务器", "value": f"{_fmt_int(st.get('servers_online'))}/{_fmt_int(st.get('servers'))}"},
+            {"label": "注册用户", "value": f"{_fmt_int(st.get('users'))}"},
+            {"label": "车队", "value": f"{_fmt_int(st.get('vtcs'))}"},
+            {"label": "累计运单", "value": f"{_fmt_int(st.get('deliveries'))}"},
+            {"label": "累计里程", "value": f"{_fmt_int(st.get('distance_km'))} km"},
+        ]
 
     async def _history_series(self, arg: str) -> Tuple[str, int, str, List[Dict[str, Any]]]:
         """解析「服务器 历史 [编号] [小时数]」参数并取采样点，返回 (code, hours, name, points)。"""
@@ -1106,6 +1141,7 @@ class CntirBotPlugin(Star):
                 "subtitle": f"{code} · 最近 {hours} 小时在线曲线",
                 "total": players,
                 "total_label": "当前在线",
+                "summary": await self._stats_summary(),
                 "cards": [card],
             }
 
@@ -1153,20 +1189,20 @@ class CntirBotPlugin(Star):
             "subtitle": "实时人数 · 24 小时在线曲线",
             "total": total,
             "total_label": "在线",
+            "summary": await self._stats_summary(),
             "cards": cards,
         }
 
     async def do_servers(self, event: AstrMessageEvent, arg: str = ""):
-        """服务器状态列表 / 在线历史（原「历史」指令）/ 导出为深蓝底图片。
+        """服务器状态 / 平台统计 / 在线历史，默认输出深蓝图片卡片。
 
-        用法：服务器 [历史] [服务器编号] [小时数] [导出]
+        用法：服务器 [历史] [服务器编号] [小时数] [文字]
         """
         tokens = [t for t in re.split(r"\s+", (arg or "").strip()) if t]
-        want_img = any(t.lower() in SERVER_EXPORT_WORDS for t in tokens)
+        want_text = any(t.lower() in SERVER_TEXT_WORDS for t in tokens)
         want_hist = any(t.lower() in SERVER_HISTORY_WORDS for t in tokens)
-        rest_arg = " ".join(
-            t for t in tokens
-            if t.lower() not in SERVER_EXPORT_WORDS and t.lower() not in SERVER_HISTORY_WORDS)
+        skip = SERVER_EXPORT_WORDS | SERVER_HISTORY_WORDS | SERVER_TEXT_WORDS
+        rest_arg = " ".join(t for t in tokens if t.lower() not in skip)
         if want_hist:
             try:
                 text = await self._history_text(rest_arg)
@@ -1179,11 +1215,11 @@ class CntirBotPlugin(Star):
             except CntirApiError as e:
                 yield event.plain_result(f"查询失败：{e.message}")
                 return
-        if want_img:
+        if not want_text:
             try:
                 data = await self._build_server_cards(want_hist, rest_arg)
             except CntirApiError as e:
-                logger.warning(f"导出图片取数失败，改为文字输出: {e}")
+                logger.warning(f"服务器卡片取数失败，改为文字输出: {e}")
                 data = None
             if data:
                 url = await self._render_server_image(data)
@@ -1193,22 +1229,6 @@ class CntirBotPlugin(Star):
                         return
                     except Exception as e:
                         logger.warning(f"服务器图片发送失败: {e}")
-        yield event.plain_result(text)
-
-    async def do_stats(self, event: AstrMessageEvent, arg: str = ""):
-        try:
-            st = await self.api_stats()
-        except CntirApiError as e:
-            yield event.plain_result(f"查询失败：{e.message}")
-            return
-        text = (
-            "📊 CNTIR 平台统计\n"
-            f"👥 当前在线: {st.get('players_online', 0)}（24h 峰值 {st.get('peak_today', 0)}）\n"
-            f"🖥 服务器: {st.get('servers_online', 0)}/{st.get('servers', 0)} 在线\n"
-            f"👤 注册用户: {st.get('users', 0)} · 车队 {st.get('vtcs', 0)}\n"
-            f"📦 累计运单: {st.get('deliveries', 0)} · 累计里程 {st.get('distance_km', 0)} km\n"
-            f"🎉 即将开始的活动: {st.get('events_upcoming', 0)}"
-        )
         yield event.plain_result(text)
 
     async def do_locate(self, event: AstrMessageEvent, arg: str = ""):
@@ -1730,9 +1750,8 @@ class CntirBotPlugin(Star):
             (rx(r"查询|查", r"\s*(\S*)"), "do_query"),
             (rx(r"定位", r"\s*(\S*)"), "do_locate"),
             (rx(r"路况", r"\s*(\S*)"), "do_traffic"),
-            # 「历史」已并入「服务器」：服务器 [历史] [编号] [小时数] [导出]
+            # 「历史」「统计」均已并入「服务器」：服务器 [历史] [编号] [小时数] [文字]
             (rx(r"服务器", r"\s*(.*)"), "do_servers"),
-            (rx(r"统计"), "do_stats"),
             (rx(r"车队", r"\s*(.*)"), "do_vtc"),
             # 详情命令必须排在列表命令之前，避免被「新闻/活动」的页码参数抢匹配
             (rx(r"新闻详情|新闻内容", r"\s*(\S*)"), "do_news_detail"),
@@ -1803,12 +1822,7 @@ class CntirBotPlugin(Star):
 
     @filter.command("cnt服务器")
     async def cmd_servers(self, event: AstrMessageEvent, args: str = ""):
-        """查看服务器状态 / 在线历史 / 导出图片，格式：cnt服务器 [历史] [编号] [小时数] [导出]"""
-        return
-
-    @filter.command("cnt统计")
-    async def cmd_stats(self, event: AstrMessageEvent):
-        """查看 CNTIR 平台数据统计"""
+        """查看服务器状态/平台统计/在线历史（默认图片），格式：cnt服务器 [历史] [编号] [小时数] [文字]"""
         return
 
     @filter.command("cnt车队")
