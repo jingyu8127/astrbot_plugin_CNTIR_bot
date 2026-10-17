@@ -30,6 +30,17 @@
   .head .total b { font-size: 46px; font-weight: 700; color: #4db8ff; letter-spacing: 1px; }
   .head .total span { display: block; font-size: 15px; color: #6f8bab; margin-top: 8px; letter-spacing: 2px; }
 
+  .summary { display: flex; gap: 8px; padding: 0 4px 16px; }
+  .sum {
+    flex: 1;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(11, 31, 56, 0.92);
+    border: 1px solid rgba(77, 148, 255, 0.20);
+  }
+  .sum em { display: block; font-style: normal; font-size: 13px; color: #7a9dc4; margin-bottom: 5px; }
+  .sum b { font-size: 18px; font-weight: 700; color: #eaf2ff; }
+
   .card {
     background: #0b1f38;
     border: 1px solid rgba(77, 148, 255, 0.22);
@@ -78,6 +89,11 @@
       <span>{{ total_label }}</span>
     </div>
   </div>
+  {% if summary %}
+  <div class="summary">
+    {% for s in summary %}<div class="sum"><em>{{ s.label }}</em><b>{{ s.value }}</b></div>{% endfor %}
+  </div>
+  {% endif %}
   {% for c in cards %}
   <div class="card">
     <div class="row">
