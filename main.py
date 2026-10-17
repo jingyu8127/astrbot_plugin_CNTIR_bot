@@ -18,6 +18,7 @@ astrbot_plugin_CNTIR_bot — CNTIR（欧洲卡车模拟 2 联机平台）查询�
 
 import asyncio
 import base64
+import html
 import io
 import json
 import math
@@ -236,6 +237,47 @@ def _clean(s: Any) -> str:
     if s is None:
         return ""
     return re.sub(r"[\r\n\t]+", " ", str(s)).strip()
+
+
+# 新闻正文 / 活动简介里的图片与链接语法（markdown 与 HTML 两种写法都要兼容）
+RE_MD_IMG = re.compile(r"!\[[^\]]*\]\(\s*([^)\s]+?)\s*\)")
+RE_HTML_IMG = re.compile(r"<img\b[^>]*?src\s*=\s*[\"']([^\"']+)[\"'][^>]*>", re.IGNORECASE)
+RE_MD_LINK = re.compile(r"\[([^\]]+)\]\(\s*([^)\s]+?)\s*\)")
+RE_IMG_EXT = re.compile(r"\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)", re.IGNORECASE)
+
+
+def _extract_images(text: Any) -> Tuple[str, List[str]]:
+    """从 markdown / HTML 文本里提取图片地址，并去掉图片语法，返回 (正文, 图片列表)。"""
+    s = str(text or "")
+    if not s:
+        return "", []
+    urls: List[str] = []
+
+    def _take(m: "re.Match[str]") -> str:
+        u = (m.group(1) or "").strip()
+        if u and u not in urls:
+            urls.append(u)
+        return ""
+
+    s = RE_MD_IMG.sub(_take, s)
+    s = RE_HTML_IMG.sub(_take, s)
+    return s, urls
+
+
+def _plain_md(text: Any) -> str:
+    """去掉 markdown / HTML 标记（标题井号、粗体、行内代码、残留标签），保留换行便于阅读。"""
+    s = str(text or "")
+    if not s:
+        return ""
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.IGNORECASE)
+    s = re.sub(r"</p\s*>", "\n", s, flags=re.IGNORECASE)
+    s = re.sub(r"<[^>]{1,200}>", "", s)  # 兜底：去掉图片之外的残留标签
+    s = html.unescape(s)
+    s = re.sub(r"^[ \t]{0,3}#{1,6}[ \t]*", "", s, flags=re.MULTILINE)
+    s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
+    s = re.sub(r"`([^`\n]+)`", r"\1", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
 
 
 # ----------------------------- 异常 -----------------------------
@@ -589,6 +631,39 @@ class CntirBotPlugin(Star):
         if p.startswith("http://") or p.startswith("https://"):
             return p
         return f"{API_BASE}/{p.lstrip('/')}"
+
+    def _md_links_to_text(self, text: Any) -> str:
+        """markdown 链接 → 「文字（绝对地址）」，避免聊天里出现裸相对路径。"""
+        def _rep(m: "re.Match[str]") -> str:
+            label = (m.group(1) or "").strip()
+            url = self._abs_url(m.group(2))
+            if not url or url == label:
+                return label
+            return f"{label}（{url}）"
+
+        return RE_MD_LINK.sub(_rep, str(text or ""))
+
+    def _link_or_text(self, v: Any) -> str:
+        """URL / 站内相对路径 → 绝对地址；普通文字原样返回。"""
+        s = _clean(v)
+        if s.startswith(("http://", "https://", "/")):
+            return self._abs_url(s)
+        return s
+
+    def _pic_urls(self, raw: Any, extra: Optional[List[str]] = None,
+                  limit: int = 3) -> List[str]:
+        """收集要随文发送的图片地址：只收看得像图片的、绝对化 + 去重 + 限量（最多 3 张）。"""
+        out: List[str] = []
+        for u in [raw] + list(extra or []):
+            s = str(u or "").strip()
+            if not s.startswith(("http://", "https://", "/")):
+                continue
+            if not RE_IMG_EXT.search(s) and "/uploads/" not in s:
+                continue
+            au = self._abs_url(s)
+            if au and au not in out:
+                out.append(au)
+        return out[:limit]
 
     # ----------------------------- 渲染层 -----------------------------
     MAP_W = 1000          # 地图视口宽（与 templates/locate.html 保持一致）
@@ -1829,7 +1904,8 @@ class CntirBotPlugin(Star):
         if isinstance(author, dict) and author.get("name"):
             meta.append(f"作者 {_clean(author.get('name'))}")
         lines.append(" · ".join([m for m in meta if m]))
-        body = _clean(n.get("body"))
+        body_raw, body_imgs = _extract_images(n.get("body"))
+        body = self._md_links_to_text(_plain_md(body_raw))
         if body:
             lines.append("────────────")
             lines.append(body[:800] + ("…（已截断）" if len(body) > 800 else ""))
@@ -1842,7 +1918,16 @@ class CntirBotPlugin(Star):
         if nav:
             lines.append("────────────\n" + "\n".join(nav))
         lines.append(f"🔗 查看全文：{PLUGIN_PAGE}/news/{arg}")
-        yield event.plain_result("\n".join(lines))
+        text = "\n".join(lines)
+        # 正文 / 封面里的图片随文字一起发出（聊天窗口看不到正文里的 markdown 图片）
+        pics = self._pic_urls(n.get("cover"), body_imgs)
+        if pics:
+            try:
+                yield event.chain_result([Image.fromURL(u) for u in pics] + [Plain(text)])
+                return
+            except Exception as e:
+                logger.warning(f"新闻配图发送失败，改为纯文字: {e}")
+        yield event.plain_result(text)
 
     async def do_event_detail(self, event: AstrMessageEvent, arg: str = ""):
         arg = (arg or "").strip()
@@ -1918,10 +2003,12 @@ class CntirBotPlugin(Star):
         dlcs = [_clean(d) for d in (ev.get("dlcs") or []) if _clean(d) and _clean(d) != "无"]
         if dlcs:
             lines.append(f"🗺 需要 DLC: {'、'.join(dlcs[:8])}")
-        desc = _clean(ev.get("description"))
+        desc_raw, desc_imgs = _extract_images(ev.get("description"))
+        desc = self._md_links_to_text(_plain_md(desc_raw))
         if desc:
             lines.append("────────────\n📝 " + desc[:600] + ("…" if len(desc) > 600 else ""))
-        rules = _clean(ev.get("rules"))
+        rules_raw, rules_imgs = _extract_images(ev.get("rules"))
+        rules = self._md_links_to_text(_plain_md(rules_raw))
         if rules:
             lines.append("📋 规则: " + rules[:400] + ("…" if len(rules) > 400 else ""))
         attendees = ev.get("attendees") or []
@@ -1937,11 +2024,23 @@ class CntirBotPlugin(Star):
             names = [_clean(v.get("name")) if isinstance(v, dict) else str(v)
                      for v in attending_vtcs[:6]]
             lines.append(f"🚚 参与车队（{len(attending_vtcs)}）: " + "、".join(names))
-        for key, label in (("route_map", "🗺 路线图"), ("voice", "🎙 语音"), ("link", "🔗 链接")):
-            v = _clean(ev.get(key))
+        for key, label in (("voice", "🎙 语音"), ("link", "🔗 链接")):
+            v = self._link_or_text(ev.get(key))
             if v:
                 lines.append(f"{label}: {v}")
-        yield event.plain_result("\n".join(lines))
+        # 路线图与简介里的图片单独作为图片消息发出（聊天窗口不显示正文图片语法）
+        route_map = self._link_or_text(ev.get("route_map"))
+        pics = self._pic_urls(route_map, desc_imgs + rules_imgs)
+        text = "\n".join(lines)
+        if pics:
+            try:
+                yield event.chain_result([Image.fromURL(u) for u in pics] + [Plain(text)])
+                return
+            except Exception as e:
+                logger.warning(f"活动配图发送失败，改为纯文字: {e}")
+                if route_map:
+                    text += f"\n🗺 路线图: {route_map}"
+        yield event.plain_result(text)
 
     async def do_version(self, event: AstrMessageEvent, arg: str = ""):
         try:
