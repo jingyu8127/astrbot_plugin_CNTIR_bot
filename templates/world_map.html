@@ -1,0 +1,63 @@
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: {{ side }}px;
+    height: {{ side }}px;
+    background: #2e3a4e;
+    overflow: hidden;
+  }
+  #map {
+    position: relative;
+    width: {{ side }}px;
+    height: {{ side }}px;
+    overflow: hidden;
+    background: #2e3a4e;
+  }
+  /* 底图由插件端用 Pillow 拼好（深蓝底 + 白色路网）并内联，页面不发任何网络请求 */
+  img.base {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: {{ side }}px;
+    height: {{ side }}px;
+    display: block;
+  }
+  .dot {
+    position: absolute;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    box-sizing: border-box;
+    border: 2px solid #08121e;
+    z-index: 5;
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.4), 0 0 14px 3px rgba(56, 189, 248, 0.95);
+  }
+  .dot::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 36%;
+    height: 36%;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.95);
+    transform: translate(-50%, -50%);
+  }
+  .dot.me {
+    border-color: #ffffff;
+    box-shadow: 0 0 0 5px rgba(34, 197, 94, 0.55), 0 0 20px 6px rgba(34, 197, 94, 1);
+  }
+  .attr {
+    position: absolute;
+    right: 10px;
+    bottom: 8px;
+    font: 13px/1 "Microsoft YaHei", "PingFang SC", sans-serif;
+    color: rgba(255, 255, 255, 0.35);
+    z-index: 6;
+  }
+</style>
+<div id="map">
+  <img class="base" src="{{ src }}" alt="">
+  {% for m in markers %}<span class="dot{{ ' me' if m.me else '' }}" style="left: {{ m.x }}px; top: {{ m.y }}px; width: {{ m.size }}px; height: {{ m.size }}px; background: {{ m.color }}"></span>{% endfor %}
+  <div class="attr">CNTIR 实时路况</div>
+</div>
