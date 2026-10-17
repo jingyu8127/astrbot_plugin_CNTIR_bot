@@ -18,6 +18,7 @@ astrbot_plugin_CNTIR_bot — CNTIR（欧洲卡车模拟 2 联机平台）查询�
 
 import asyncio
 import base64
+import io
 import json
 import math
 import os
@@ -27,6 +28,18 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import aiohttp
+
+try:  # 整图模式用 Pillow 把瓦片拼成一张底图；环境缺 Pillow 时自动回退到瓦片摆位方案
+    from PIL import Image as _PilImage
+    from PIL import ImageChops as _PilChops
+    from PIL import ImageFilter as _PilFilter
+
+    _pil_lanczos = getattr(getattr(_PilImage, "Resampling", _PilImage), "LANCZOS", 1)
+except Exception:  # pragma: no cover
+    _PilImage = None  # type: ignore[assignment]
+    _PilChops = None  # type: ignore[assignment]
+    _PilFilter = None  # type: ignore[assignment]
+    _pil_lanczos = 1
 
 # ----------------------------- AstrBot API 导入（含脱离环境的回退桩） -----------------------------
 try:
@@ -102,6 +115,8 @@ PLUGIN_PAGE = "https://cntir.ltchedui.com"
 # ETS2 底图瓦片（默认源与故障回退源，均为公开镜像）
 DEFAULT_TILE_URL = "https://ets_tiles.cnly.top/20260903/tmp-ets-yellow/Tiles/{z}/{x}/{y}.png"
 FALLBACK_TILE_URL = "https://ets2.online/map/ets2map_157/{z}/{x}/{y}.png"
+# 整图白化：R-B 超过阈值即视为黄色路网（256 级查找表，交给 Pillow 用 C 层查表）
+YELLOW_CUT_LUT = [255 if v > 40 else 0 for v in range(256)]
 
 ROLE_MAP = {
     "player": "玩家",
@@ -265,7 +280,7 @@ class CntirBotPlugin(Star):
         self.config = config or {}
         self.session: Optional[aiohttp.ClientSession] = None
         self._cache = _TtlCache()
-        self._tile_cache: Dict[str, str] = {}
+        self._tile_cache: Dict[str, bytes] = {}
         self._tile_sem: Optional[asyncio.Semaphore] = None
 
         # 数据目录：AstrBot 规范位置，插件更新不丢数据
@@ -466,6 +481,12 @@ class CntirBotPlugin(Star):
         return max(1, min(10, self._cfg_int("max_bind_count", 3)))
 
     @property
+    def _map_points_limit(self) -> int:
+        """路况整图最多渲染的点数（钳制到 50-1000，防止图糊满或渲染超时）。"""
+        return max(50, min(self.MAP_POINTS_MAX,
+                           self._cfg_int("max_map_points", self.MAP_POINTS_MAX)))
+
+    @property
     def _p(self) -> str:
         """提示文案中的命令前缀：开启免前缀时为空串。"""
         return "" if self._cfg_bool("enable_no_prefix", True) else "cnt"
@@ -573,9 +594,14 @@ class CntirBotPlugin(Star):
     MAP_W = 1000          # 地图视口宽（与 templates/locate.html 保持一致）
     MAP_H = 800           # 地图视口高
     TILE_SIZE = 512       # 瓦片像素（ETS2 底图为 512px 瓦片）
+    WORLD_SIZE = 900      # 整图模式边长（正方形欧洲地图）
+    WORLD_BG = (46, 58, 78)  # 整图底色（深蓝，与参考图一致）
+    TILE_CACHE_BYTES = 24 * 1024 * 1024  # 瓦片内存缓存上限（整图模式要缓存几十张瓦片）
+    NEARBY_MAX_CAP = 50   # 定位文字里最多列出的附近玩家数（消息长度上限）
+    MAP_POINTS_MAX = 1000  # 整图最多渲染的玩家点数（再多会糊成一片）
 
-    async def _fetch_tile_uri(self, url: str) -> Optional[str]:
-        """下载单张瓦片并转成 data URI（内存缓存），失败重试一次。"""
+    async def _fetch_tile_bytes(self, url: str) -> Optional[bytes]:
+        """下载单张瓦片的原始字节（内存缓存），失败重试一次。"""
         cached = self._tile_cache.get(url)
         if cached:
             return cached
@@ -600,11 +626,17 @@ class CntirBotPlugin(Star):
                     await asyncio.sleep(0.3)
         if not data:
             return None
-        uri = "data:image/png;base64," + base64.b64encode(data).decode()
-        if len(self._tile_cache) >= 400:
+        # 缓存按总量回收：整图模式的瓦片多且体积大，只按条数限制会吃满内存
+        if sum(len(v) for v in self._tile_cache.values()) + len(data) > self.TILE_CACHE_BYTES:
             self._tile_cache.clear()
-        self._tile_cache[url] = uri
-        return uri
+        self._tile_cache[url] = data
+        return data
+
+    async def _tile_bytes(self, primary: str, fallback: str) -> Optional[bytes]:
+        data = await self._fetch_tile_bytes(primary)
+        if data is None and fallback:
+            data = await self._fetch_tile_bytes(fallback)
+        return data
 
     @staticmethod
     def _fmt_tile(tmpl: str, z: int, x: int, y: int) -> str:
@@ -626,10 +658,10 @@ class CntirBotPlugin(Star):
         return float(max(2, min(8, zoom)))
 
     async def _tile_uri(self, primary: str, fallback: str) -> Optional[str]:
-        uri = await self._fetch_tile_uri(primary)
-        if uri is None and fallback:
-            uri = await self._fetch_tile_uri(fallback)
-        return uri
+        data = await self._tile_bytes(primary, fallback)
+        if not data:
+            return None
+        return "data:image/png;base64," + base64.b64encode(data).decode()
 
     async def _render_map(self, players: List[Dict[str, Any]], center: Tuple[float, float],
                           zoom: float = 8.0, world: bool = False,
@@ -771,6 +803,109 @@ class CntirBotPlugin(Star):
             logger.warning(f"地图渲染失败，降级为文字: {e}")
             return None
 
+    def _compose_world_tiles(self, jobs: List[Tuple[int, int, str, str]],
+                             raw: List[Optional[bytes]], z: int) -> Optional[str]:
+        """把全部瓦片拼成一张整图底稿（深蓝底 + 白色路网），返回 PNG 的 data URI。
+
+        瓦片本身是「透明底 + 黄色路网 + 蓝灰渡轮虚线」：只把偏黄的像素提成白色，
+        虚线保留原色，观感与 CNTIR 官网的深色地图一致。
+        """
+        if _PilImage is None or _PilChops is None or _PilFilter is None:
+            return None
+        try:
+            tile_px = self.TILE_SIZE
+            n = 2 ** z
+            world = _PilImage.new("RGBA", (tile_px * n, tile_px * n), (0, 0, 0, 0))
+            for (i, j, _p, _f), data in zip(jobs, raw):
+                if not data:
+                    continue
+                try:
+                    im = _PilImage.open(io.BytesIO(data)).convert("RGBA")
+                except Exception:
+                    continue
+                r, _g, b, a = im.split()
+                # 黄色（R 明显大于 B）判为路网；蓝灰色渡轮虚线保留原色
+                yellow = _PilChops.subtract(r, b).point(YELLOW_CUT_LUT)
+                # 线宽先膨胀 1px，整图缩小到画布后细线才不会断
+                mask = _PilChops.multiply(a, yellow).filter(_PilFilter.MaxFilter(3))
+                white = _PilImage.new("RGBA", im.size, (255, 255, 255, 0))
+                white.putalpha(mask)
+                world.alpha_composite(_PilImage.alpha_composite(im, white),
+                                      (i * tile_px, j * tile_px))
+            canvas = _PilImage.new("RGB", world.size, self.WORLD_BG)
+            canvas.paste(world, (0, 0), world)
+            canvas = canvas.resize((self.WORLD_SIZE, self.WORLD_SIZE), _pil_lanczos)
+            buf = io.BytesIO()
+            canvas.save(buf, format="PNG", optimize=True)
+            return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+        except Exception as e:
+            logger.warning(f"整图底图合成失败: {e}")
+            return None
+
+    async def _render_world_map(self, players: List[Dict[str, Any]],
+                                z: int = 2) -> Optional[str]:
+        """渲染**整张欧洲地图**（深蓝底 + 白路网 + 玩家点），失败返回 None。
+
+        与 `_render_map` 的视口模式不同：这里把 4**z 张瓦片拼成一张底图再截图，
+        地图天然完整、不会只画出局部，也不依赖 Leaflet 异步加载。
+        """
+        if not self._cfg_bool("map_enable", True) or not self.session:
+            return None
+        z = max(0, min(4, int(z)))
+        if _PilImage is None:
+            # 环境缺 Pillow：退回瓦片 img 摆位（路网是黄色，但整图仍然完整）
+            return await self._render_map(players, (0.0, 0.0), world=True, world_zoom=z)
+        try:
+            n = 2 ** z
+            world_px = self.TILE_SIZE * n
+            side = self.WORLD_SIZE
+            k = side / world_px
+            scale8 = 2 ** (8 - z)
+
+            def to_px(x: Any, y: Any) -> Tuple[float, float]:
+                return ((float(x or 0) / 1.609055 + 70272) / scale8,
+                        (float(y or 0) / 1.609055 + 76157) / scale8)
+
+            tile_tmpl = self._cfg_str("tile_url_ets", "").strip() or DEFAULT_TILE_URL
+            jobs: List[Tuple[int, int, str, str]] = [
+                (i, j, self._fmt_tile(tile_tmpl, z, i, j),
+                 self._fmt_tile(FALLBACK_TILE_URL, z, i, j))
+                for i in range(n) for j in range(n)
+            ]
+            raw = await asyncio.gather(*[self._tile_bytes(p, f) for _i, _j, p, f in jobs])
+            base = await asyncio.to_thread(self._compose_world_tiles, jobs, list(raw), z)
+            if not base:
+                return None
+
+            markers = []
+            for p in players:
+                mx, my = to_px(p.get("axisX"), p.get("axisZ"))
+                x, y = mx * k, my * k
+                if not (-12 <= x <= side + 12 and -12 <= y <= side + 12):
+                    continue
+                me = bool(p.get("me"))
+                markers.append({
+                    "x": round(x, 1), "y": round(y, 1),
+                    "size": 22 if me else 13,
+                    "color": "#22c55e" if me else "#38bdf8",
+                    "me": me,
+                })
+
+            tmpl = await asyncio.to_thread(
+                self._read_file, os.path.join(self.tpl_dir, "world_map.html"))
+            if not tmpl:
+                return None
+            url = await self.html_render(tmpl, {
+                "side": side, "src": base, "markers": markers,
+            }, options={
+                "type": "jpeg", "quality": 92, "full_page": True,
+                "timeout": 10000, "animations": "disabled",
+            })
+            return url if isinstance(url, str) and url else None
+        except Exception as e:
+            logger.warning(f"整图渲染失败，降级为文字: {e}")
+            return None
+
     async def _render_server_image(self, data: Dict[str, Any]) -> Optional[str]:
         """渲染服务器卡片图（深蓝底 + 分服卡片 + 24h 曲线），失败返回 None（调用方降级文字）。"""
         try:
@@ -821,7 +956,7 @@ class CntirBotPlugin(Star):
             ("🔗", "我的", "查看我的全部绑定"),
             ("👤", "查询 [ID/@人]", "玩家资料（留空查主账号）"),
             ("📍", "定位 [ID/@人]", "实时位置地图"),
-            ("🛣", "路况 [服务器]", "在线玩家分布统计"),
+            ("🛣", "路况 [服务器]", "整张欧洲地图 + 在线玩家分布"),
             ("🖥", "服务器", "服务器状态"),
             ("🚚", "车队 [ID/关键词]", "车队列表/搜索/详情"),
             ("🎉", "活动 [今日/精选/结束/页码]", "活动列表"),
@@ -1357,7 +1492,8 @@ class CntirBotPlugin(Star):
 
         # 附近玩家（同账号排除，按配置半径）
         radius = max(500, self._cfg_int("nearby_radius_m", 5000))
-        max_cnt = max(1, self._cfg_int("nearby_max_count", 10))
+        max_cnt = max(1, min(self.NEARBY_MAX_CAP,
+                             self._cfg_int("nearby_max_count", self.NEARBY_MAX_CAP)))
         nearby: List[Tuple[float, Dict[str, Any]]] = []
         try:
             for server in map_data.get("servers", []):
@@ -1449,18 +1585,16 @@ class CntirBotPlugin(Star):
             if hot_txt:
                 block.append(f"🔥 热点区域（5km 网格）: {hot_txt}")
             blocks.append("\n".join(block))
-            for q in players[: max(50, self._cfg_int("max_map_points", 400))]:
+            for q in players[: self._map_points_limit]:
                 all_points.append({"axisX": float(q.get("x") or 0),
                                    "axisZ": float(q.get("z") or 0), "me": 0})
 
         text = "🛣 CNTIR 实时路况\n\n" + "\n\n".join(blocks)
-        if len(all_points) >= 2:
-            xs = [p["axisX"] for p in all_points]
-            zs = [p["axisZ"] for p in all_points]
-            cx = (min(xs) + max(xs)) / 2
-            cz = (min(zs) + max(zs)) / 2
-            url = await self._render_map(all_points[: self._cfg_int("max_map_points", 400)],
-                                         (cx, cz), zoom=self._fit_zoom(xs, zs))
+        if all_points:
+            # 路况发整张欧洲地图：所有在线玩家一眼看全，不再按点范围裁视口
+            url = await self._render_world_map(
+                all_points[: self._map_points_limit],
+                self._cfg_int("world_map_zoom", 2))
             if url:
                 try:
                     yield event.chain_result([Image.fromURL(url), Plain(text)])
