@@ -574,22 +574,25 @@ class CntirBotPlugin(Star):
     TILE_SIZE = 512       # 瓦片像素（ETS2 底图为 512px 瓦片）
 
     async def _fetch_tile_uri(self, url: str) -> Optional[str]:
-        """下载单张瓦片并转成 data URI（内存缓存），失败返回 None。"""
+        """下载单张瓦片并转成 data URI（内存缓存），失败重试一次。"""
         cached = self._tile_cache.get(url)
         if cached:
             return cached
         if not self.session:
             return None
-        try:
-            # 瓦片镜像的证书与域名不匹配（Hostname mismatch），严格校验会直接失败，
-            # 表现为「地图有时空白 / 只有一半」。仅对公开瓦片图片放宽校验，其余请求仍严格校验。
-            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=10),
-                                        ssl=False) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.read()
-        except Exception:
-            return None
+        data = b""
+        for _ in range(2):
+            try:
+                # 瓦片镜像的证书与域名不匹配（Hostname mismatch），严格校验会直接失败，
+                # 表现为「地图有时空白 / 只有一半」。仅对公开瓦片图片放宽校验，其余请求仍严格校验。
+                async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=10),
+                                            ssl=False) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        if data:
+                            break
+            except Exception:
+                await asyncio.sleep(0.3)
         if not data:
             return None
         uri = "data:image/png;base64," + base64.b64encode(data).decode()
@@ -597,6 +600,14 @@ class CntirBotPlugin(Star):
             self._tile_cache.clear()
         self._tile_cache[url] = uri
         return uri
+
+    @staticmethod
+    def _fmt_tile(tmpl: str, z: int, x: int, y: int) -> str:
+        """瓦片 URL 模板填充，模板不含占位符时原样返回。"""
+        try:
+            return tmpl.format(z=z, x=x, y=y)
+        except Exception:
+            return tmpl
 
     def _fit_zoom(self, xs: List[float], zs: List[float], margin: float = 0.85) -> float:
         """按点位范围选缩放级别（2~8），保证所有点都落在画面内（避免只看到一两个点）。"""
@@ -648,15 +659,9 @@ class CntirBotPlugin(Star):
                                int(math.floor((top + self.MAP_H) / tile_px)) + 1):
                     if not (0 <= i <= max_idx and 0 <= j <= max_idx):
                         continue
-                    try:
-                        primary = tile_tmpl.format(z=z, x=i, y=j)
-                    except Exception:
-                        primary = tile_tmpl
-                    try:
-                        fallback = FALLBACK_TILE_URL.format(z=z, x=i, y=j)
-                    except Exception:
-                        fallback = FALLBACK_TILE_URL
-                    jobs.append((i, j, primary, fallback))
+                    jobs.append((i, j,
+                                 self._fmt_tile(tile_tmpl, z, i, j),
+                                 self._fmt_tile(FALLBACK_TILE_URL, z, i, j)))
             if not jobs:
                 return None
 
@@ -664,14 +669,58 @@ class CntirBotPlugin(Star):
                 self._tile_uri(p, f) for _i, _j, p, f in jobs
             ])
             tiles = []
+            missing: List[Tuple[int, int]] = []
             for (i, j, _p, _f), uri in zip(jobs, uris):
                 if not uri:
+                    missing.append((i, j))
                     continue
                 tiles.append({
-                    "src": uri,
+                    "src": uri, "size": tile_px,
                     "left": round(i * tile_px - left, 1),
                     "top": round(j * tile_px - top, 1),
                 })
+
+            # 缺块先用上一级（更粗）瓦片放大 2 倍补位，避免画面出现整块黑洞
+            if missing and z > 2:
+                parents = sorted({(i // 2, j // 2) for i, j in missing})
+                puris = await asyncio.gather(*[
+                    self._tile_uri(self._fmt_tile(tile_tmpl, z - 1, pi, pj),
+                                   self._fmt_tile(FALLBACK_TILE_URL, z - 1, pi, pj))
+                    for pi, pj in parents
+                ])
+                filled = set()
+                for (pi, pj), uri in zip(parents, puris):
+                    if not uri:
+                        continue
+                    tiles.append({
+                        "src": uri, "size": tile_px * 2, "parent": True,
+                        "left": round(pi * tile_px * 2 - left, 1),
+                        "top": round(pj * tile_px * 2 - top, 1),
+                    })
+                    filled |= {(i, j) for i, j in missing if (i // 2, j // 2) == (pi, pj)}
+                missing = [c for c in missing if c not in filled]
+
+            # 仍缺块时改用下一级（更细）瓦片缩小 0.5 倍补位（z=2 没有上一级时也能补上）
+            if missing and z < 8:
+                kids: List[Tuple[int, int, int, int, int, int]] = []
+                for i, j in missing:
+                    for dx in (0, 1):
+                        for dy in (0, 1):
+                            kids.append((i * 2 + dx, j * 2 + dy, i, j, dx, dy))
+                kuris = await asyncio.gather(*[
+                    self._tile_uri(self._fmt_tile(tile_tmpl, z + 1, ci, cj),
+                                   self._fmt_tile(FALLBACK_TILE_URL, z + 1, ci, cj))
+                    for ci, cj, _i, _j, _dx, _dy in kids
+                ])
+                half = tile_px // 2
+                for (ci, cj, pi, pj, dx, dy), uri in zip(kids, kuris):
+                    if not uri:
+                        continue
+                    tiles.append({
+                        "src": uri, "size": half,
+                        "left": round(pi * tile_px + dx * half - left, 1),
+                        "top": round(pj * tile_px + dy * half - top, 1),
+                    })
             if not tiles:
                 return None
 
