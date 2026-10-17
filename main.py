@@ -266,6 +266,7 @@ class CntirBotPlugin(Star):
         self.session: Optional[aiohttp.ClientSession] = None
         self._cache = _TtlCache()
         self._tile_cache: Dict[str, str] = {}
+        self._tile_sem: Optional[asyncio.Semaphore] = None
 
         # 数据目录：AstrBot 规范位置，插件更新不丢数据
         self.data_dir = os.path.join(os.getcwd(), "data", "plugin_data", PLUGIN_NAME)
@@ -580,19 +581,23 @@ class CntirBotPlugin(Star):
             return cached
         if not self.session:
             return None
+        # 整图模式会一次请求上百张瓦片，用信号量限制并发，避免被镜像限流或打满连接池
+        if self._tile_sem is None:
+            self._tile_sem = asyncio.Semaphore(16)
         data = b""
-        for _ in range(2):
-            try:
-                # 瓦片镜像的证书与域名不匹配（Hostname mismatch），严格校验会直接失败，
-                # 表现为「地图有时空白 / 只有一半」。仅对公开瓦片图片放宽校验，其余请求仍严格校验。
-                async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=10),
-                                            ssl=False) as resp:
-                    if resp.status == 200:
-                        data = await resp.read()
-                        if data:
-                            break
-            except Exception:
-                await asyncio.sleep(0.3)
+        async with self._tile_sem:
+            for _ in range(2):
+                try:
+                    # 瓦片镜像的证书与域名不匹配（Hostname mismatch），严格校验会直接失败，
+                    # 表现为「地图有时空白 / 只有一半」。仅对公开瓦片图片放宽校验，其余请求仍严格校验。
+                    async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=10),
+                                                ssl=False) as resp:
+                        if resp.status == 200:
+                            data = await resp.read()
+                            if data:
+                                break
+                except Exception:
+                    await asyncio.sleep(0.3)
         if not data:
             return None
         uri = "data:image/png;base64," + base64.b64encode(data).decode()
@@ -609,7 +614,7 @@ class CntirBotPlugin(Star):
         except Exception:
             return tmpl
 
-    def _fit_zoom(self, xs: List[float], zs: List[float], margin: float = 0.85) -> float:
+    def _fit_zoom(self, xs: List[float], zs: List[float], margin: float = 0.72) -> float:
         """按点位范围选缩放级别（2~8），保证所有点都落在画面内（避免只看到一两个点）。"""
         try:
             span = max(max(xs) - min(xs), max(zs) - min(zs)) / 1.609055
@@ -627,44 +632,56 @@ class CntirBotPlugin(Star):
         return uri
 
     async def _render_map(self, players: List[Dict[str, Any]], center: Tuple[float, float],
-                          zoom: float = 8.0) -> Optional[str]:
+                          zoom: float = 8.0, world: bool = False,
+                          world_zoom: int = 2) -> Optional[str]:
         """渲染 ETS2 底图 + 玩家点，成功返回图片 URL，失败返回 None（由调用方降级）。
 
-        底图改为「先在 Python 里下载瓦片并内联成 data URI，再用静态 HTML 摆位」，
-        不再依赖 Leaflet/JS 异步取瓦片，避免截图时地图空白或只渲染一半。
+        world=True 时输出**整张地图**（全部瓦片等比缩进画布，world_zoom 限 0~4，过大瓦片数会爆量），
+        world=False 时按 center/zoom 取视口。
+        底图由插件端先下载瓦片并内联 data URI，再静态摆位，不依赖 Leaflet/JS。
         players: [{"axisX", "axisZ", "me"}]；center: (x, z)
         坐标换算：CNTIR 世界坐标（米）→ z8 瓦片像素（÷1.609055 + 平移），再按 zoom 缩放。
         """
         if not self._cfg_bool("map_enable", True) or not players or not self.session:
             return None
         try:
-            z = max(2, min(8, int(round(zoom))))
-            scale = 2 ** (8 - z)          # z8 像素 → 当前缩放级别的像素
             tile_px = self.TILE_SIZE
+            z = max(0, min(4, int(world_zoom))) if world else max(2, min(8, int(round(zoom))))
+            scale8 = 2 ** (8 - z)          # z8 像素 → 当前缩放级别的像素
             max_idx = 2 ** z - 1
+            world_px = tile_px * (2 ** z)
 
             def to_px(x: Any, y: Any) -> Tuple[float, float]:
-                return ((float(x or 0) / 1.609055 + 70272) / scale,
-                        (float(y or 0) / 1.609055 + 76157) / scale)
+                return ((float(x or 0) / 1.609055 + 70272) / scale8,
+                        (float(y or 0) / 1.609055 + 76157) / scale8)
 
-            cx, cz = to_px(center[0], center[1])
-            left = cx - self.MAP_W / 2
-            top = cz - self.MAP_H / 2
-
-            tile_tmpl = self._cfg_str("tile_url_ets", "").strip() or DEFAULT_TILE_URL
-            jobs: List[Tuple[int, int, str, str]] = []
-            for i in range(int(math.floor(left / tile_px)),
-                           int(math.floor((left + self.MAP_W) / tile_px)) + 1):
-                for j in range(int(math.floor(top / tile_px)),
-                               int(math.floor((top + self.MAP_H) / tile_px)) + 1):
-                    if not (0 <= i <= max_idx and 0 <= j <= max_idx):
-                        continue
-                    jobs.append((i, j,
-                                 self._fmt_tile(tile_tmpl, z, i, j),
-                                 self._fmt_tile(FALLBACK_TILE_URL, z, i, j)))
-            if not jobs:
+            if world:
+                # 整图模式：世界等比缩进画布并居中，k 为显示缩放
+                k = min(self.MAP_W, self.MAP_H) / world_px
+                off_x = (self.MAP_W - world_px * k) / 2
+                off_y = (self.MAP_H - world_px * k) / 2
+                cells = [(i, j) for i in range(max_idx + 1) for j in range(max_idx + 1)]
+            else:
+                k = 1.0
+                cx, cz = to_px(center[0], center[1])
+                off_x = self.MAP_W / 2 - cx
+                off_y = self.MAP_H / 2 - cz
+                cells = []
+                for i in range(int(math.floor(-off_x / tile_px)),
+                               int(math.floor((self.MAP_W - off_x) / tile_px)) + 1):
+                    for j in range(int(math.floor(-off_y / tile_px)),
+                                   int(math.floor((self.MAP_H - off_y) / tile_px)) + 1):
+                        cells.append((i, j))
+            cells = [(i, j) for i, j in cells if 0 <= i <= max_idx and 0 <= j <= max_idx]
+            if not cells:
                 return None
 
+            tile_tmpl = self._cfg_str("tile_url_ets", "").strip() or DEFAULT_TILE_URL
+            jobs: List[Tuple[int, int, str, str]] = [
+                (i, j, self._fmt_tile(tile_tmpl, z, i, j),
+                 self._fmt_tile(FALLBACK_TILE_URL, z, i, j))
+                for i, j in cells
+            ]
             uris = await asyncio.gather(*[
                 self._tile_uri(p, f) for _i, _j, p, f in jobs
             ])
@@ -675,13 +692,13 @@ class CntirBotPlugin(Star):
                     missing.append((i, j))
                     continue
                 tiles.append({
-                    "src": uri, "size": tile_px,
-                    "left": round(i * tile_px - left, 1),
-                    "top": round(j * tile_px - top, 1),
+                    "src": uri, "size": round(tile_px * k, 1),
+                    "left": round(off_x + i * tile_px * k, 1),
+                    "top": round(off_y + j * tile_px * k, 1),
                 })
 
             # 缺块先用上一级（更粗）瓦片放大 2 倍补位，避免画面出现整块黑洞
-            if missing and z > 2:
+            if missing and z > 0:
                 parents = sorted({(i // 2, j // 2) for i, j in missing})
                 puris = await asyncio.gather(*[
                     self._tile_uri(self._fmt_tile(tile_tmpl, z - 1, pi, pj),
@@ -693,14 +710,14 @@ class CntirBotPlugin(Star):
                     if not uri:
                         continue
                     tiles.append({
-                        "src": uri, "size": tile_px * 2, "parent": True,
-                        "left": round(pi * tile_px * 2 - left, 1),
-                        "top": round(pj * tile_px * 2 - top, 1),
+                        "src": uri, "size": round(tile_px * 2 * k, 1), "parent": True,
+                        "left": round(off_x + pi * tile_px * 2 * k, 1),
+                        "top": round(off_y + pj * tile_px * 2 * k, 1),
                     })
                     filled |= {(i, j) for i, j in missing if (i // 2, j // 2) == (pi, pj)}
                 missing = [c for c in missing if c not in filled]
 
-            # 仍缺块时改用下一级（更细）瓦片缩小 0.5 倍补位（z=2 没有上一级时也能补上）
+            # 仍缺块时改用下一级（更细）瓦片缩小 0.5 倍补位
             if missing and z < 8:
                 kids: List[Tuple[int, int, int, int, int, int]] = []
                 for i, j in missing:
@@ -712,14 +729,14 @@ class CntirBotPlugin(Star):
                                    self._fmt_tile(FALLBACK_TILE_URL, z + 1, ci, cj))
                     for ci, cj, _i, _j, _dx, _dy in kids
                 ])
-                half = tile_px // 2
-                for (ci, cj, pi, pj, dx, dy), uri in zip(kids, kuris):
+                half = tile_px / 2
+                for (_ci, _cj, pi, pj, dx, dy), uri in zip(kids, kuris):
                     if not uri:
                         continue
                     tiles.append({
-                        "src": uri, "size": half,
-                        "left": round(pi * tile_px + dx * half - left, 1),
-                        "top": round(pj * tile_px + dy * half - top, 1),
+                        "src": uri, "size": round(half * k, 1),
+                        "left": round(off_x + (pi * tile_px + dx * half) * k, 1),
+                        "top": round(off_y + (pj * tile_px + dy * half) * k, 1),
                     })
             if not tiles:
                 return None
@@ -727,14 +744,14 @@ class CntirBotPlugin(Star):
             markers = []
             for p in players:
                 mx, my = to_px(p.get("axisX"), p.get("axisZ"))
-                x, y = mx - left, my - top
+                x, y = off_x + mx * k, off_y + my * k
                 if not (-16 <= x <= self.MAP_W + 16 and -16 <= y <= self.MAP_H + 16):
                     continue
                 me = bool(p.get("me"))
                 markers.append({
                     "x": round(x, 1), "y": round(y, 1),
-                    "size": 14 if me else 8,
-                    "color": "#57bd00" if me else "#3ca7ff",
+                    "size": 24 if me else 15,
+                    "color": "#22c55e" if me else "#38bdf8",
                     "me": me,
                 })
 
