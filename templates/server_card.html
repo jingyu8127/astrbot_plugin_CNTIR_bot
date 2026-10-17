@@ -6,9 +6,16 @@
   }
   body {
     width: 1000px;
+    /* 注意：不要把 emoji 字体写进字体栈——Noto Color Emoji 里带数字字形（键帽 emoji），
+       渲染机缺少前几个中文字体时数字会被 emoji 字体接管，看起来像被涂黑、字距被拉开。
+       emoji 字符由浏览器按字符自动回退，无需显式声明。 */
     font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC",
-                 "Segoe UI", "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+                 "WenQuanYi Micro Hei", "Noto Sans", "DejaVu Sans", "Liberation Sans",
+                 "Segoe UI", Arial, sans-serif;
     -webkit-font-smoothing: antialiased;
+  }
+  .num b, .head .total b, .sum b, .stat b, .tag, .code {
+    font-variant-numeric: tabular-nums;
   }
   .wrap {
     box-sizing: border-box;
@@ -24,10 +31,10 @@
     display: flex; align-items: center; justify-content: center;
     font-size: 24px; color: #ffffff;
   }
-  .head .t { font-size: 34px; font-weight: 700; color: #ffffff; letter-spacing: 1px; }
+  .head .t { font-size: 34px; font-weight: 700; color: #ffffff; }
   .head .s { font-size: 17px; color: #7a9dc4; margin: 4px 0 0; }
   .head .total { margin-left: auto; text-align: right; line-height: 1; }
-  .head .total b { font-size: 46px; font-weight: 700; color: #4db8ff; letter-spacing: 1px; }
+  .head .total b { font-size: 46px; font-weight: 700; color: #4db8ff; }
   .head .total span { display: block; font-size: 15px; color: #6f8bab; margin-top: 8px; letter-spacing: 2px; }
 
   .summary { display: flex; gap: 8px; padding: 0 4px 16px; }
@@ -73,7 +80,7 @@
   .stat em { display: block; font-style: normal; font-size: 13px; color: #7a9dc4; margin-bottom: 4px; }
   .stat b { font-size: 21px; font-weight: 700; color: #eaf2ff; }
 
-  .foot { padding-top: 4px; text-align: center; font-size: 13px; color: #3f5b7d; letter-spacing: 5px; }
+  .foot { padding-top: 4px; text-align: center; font-size: 13px; color: #3f5b7d; letter-spacing: 2px; }
 </style>
 <div class="wrap">
   <div class="head">
