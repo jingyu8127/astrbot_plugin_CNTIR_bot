@@ -22,14 +22,30 @@
     z-index: 2;
   }
   .tile.parent { z-index: 1; }
+  /* 玩家标记：深色描边 + 光晕 + 中心白点，黄色路网上也能一眼看到 */
   .dot {
     position: absolute;
     border-radius: 50%;
     transform: translate(-50%, -50%);
-    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+    box-sizing: border-box;
+    border: 2px solid #08121e;
+    z-index: 5;
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.4), 0 0 14px 3px rgba(56, 189, 248, 0.95);
+  }
+  .dot::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 36%;
+    height: 36%;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.95);
+    transform: translate(-50%, -50%);
   }
   .dot.me {
-    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.65), 0 0 10px rgba(87, 189, 0, 0.9);
+    border-color: #ffffff;
+    box-shadow: 0 0 0 5px rgba(34, 197, 94, 0.55), 0 0 20px 6px rgba(34, 197, 94, 1);
   }
   .attr {
     position: absolute;
